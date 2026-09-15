@@ -11,10 +11,11 @@ function getServerURL() {
 
 const socket = io(getServerURL(), {
   reconnection: true,
-  reconnectionAttempts: 15,
-  reconnectionDelay: 1000,
-  reconnectionDelayMax: 5000,
-  randomizationFactor: 0.5
+  reconnectionAttempts: 20,
+  reconnectionDelay: 2000,
+  reconnectionDelayMax: 10000,
+  randomizationFactor: 0.5,
+  timeout: 20000
 });
 
 // Video Sinks
