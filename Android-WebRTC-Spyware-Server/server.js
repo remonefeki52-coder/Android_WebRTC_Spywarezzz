@@ -6,14 +6,24 @@ const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
+
+// تحديد النطاق (Origin) ديناميكياً
+const corsOrigin = process.env.RAILWAY_PUBLIC_DOMAIN 
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` 
+    : '*';
+
 const io = new Server(server, {
   cors: {
-    origin: '*',
+    origin: corsOrigin, // يقبل النطاق العام لـ Railway تلقائياً
     methods: ['GET', 'POST'],
     credentials: true
-  }
+  },
+  // تعطيل الضغط لمنع مشاكل TCP_OVERWIN مع بروكسي Railway
+  perMessageDeflate: false,
+  // زيادة مهلة الاتصال لمنع الانقطاع المتكرر
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
-
 const publicPath = path.join(__dirname, 'public');
 if (!fs.existsSync(publicPath)) {
   console.error(`FATAL: Public directory not found at: ${publicPath}`);
