@@ -6,7 +6,7 @@ function getServerURL() {
   if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.') || hostname.startsWith('10.') || hostname.startsWith('172.')) {
     return 'http://localhost:3000';
   }
-  return `http://${hostname}:3000`;
+  return window.location.origin;
 }
 
 const socket = io(getServerURL(), {
