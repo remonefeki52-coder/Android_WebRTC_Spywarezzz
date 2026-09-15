@@ -103,7 +103,11 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('*', (req, res) => {
+app.get('*', (req, res, next) => {
+  // Skip Socket.IO paths - let Socket.IO handle them
+  if (req.path.startsWith('/socket.io')) {
+    return next();
+  }
   const indexPath = path.join(publicPath, 'index.html');
   if (fs.existsSync(indexPath)) {
     console.log(`Serving index.html for ${req.url}`);
