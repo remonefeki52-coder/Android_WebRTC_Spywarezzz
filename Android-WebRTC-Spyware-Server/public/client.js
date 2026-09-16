@@ -22,24 +22,6 @@ function getWebSocketURL() {
 // ─────────────────────────────────────────────────────────────
 // SignalingWebSocket — Drop-in replacement for Socket.IO client
 // ─────────────────────────────────────────────────────────────
-//
-// Mimics the Socket.IO client API on top of the native WebSocket:
-//   socket.on(eventName, handler)   — register event listener
-//   socket.emit(eventName, payload) — send JSON message { type, ...payload }
-//   socket.connect() / socket.disconnect()
-//   socket.connected  (property)
-//   socket.id         (property, set after server handshake)
-//
-// Special events that carry a single "id" string:
-//   id, web-client-ready, web-client-disconnected,
-//   android-client-ready, android-client-disconnected
-//
-// Lifecycle events are synthesized:
-//   'connect'       → fired on WebSocket open
-//   'connect_error' → fired on WebSocket error
-//   'disconnect'    → fired on WebSocket close
-//
-// ─────────────────────────────────────────────────────────────
 
 class SignalingWebSocket {
   constructor(url) {
@@ -47,7 +29,7 @@ class SignalingWebSocket {
     this.ws = null;
     this._id = null;
     this._connected = false;
-    this._listeners = new Map();      // eventName -> [handlers]
+    this._listeners = new Map();
     this._shouldReconnect = false;
     this._reconnectDelay = 2000;
     this._reconnectMaxDelay = 10000;
@@ -55,7 +37,6 @@ class SignalingWebSocket {
     this._maxReconnectAttempts = 20;
     this._reconnectTimer = null;
 
-    // Events whose payload is a single string id (from the server)
     this._idEvents = new Set([
       'id',
       'web-client-ready',
@@ -65,7 +46,6 @@ class SignalingWebSocket {
     ]);
   }
 
-  // Public: register a listener
   on(eventName, handler) {
     if (!this._listeners.has(eventName)) {
       this._listeners.set(eventName, []);
@@ -74,7 +54,6 @@ class SignalingWebSocket {
     return this;
   }
 
-  // Public: send a message to the server
   emit(eventName, payload) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn(`[WS] Cannot emit "${eventName}" — not connected`);
@@ -83,7 +62,6 @@ class SignalingWebSocket {
 
     let message;
     if (eventName === 'identify') {
-      // Special case: the server expects { type: "identify", clientType: "web" }
       message = { type: 'identify', clientType: payload || 'web' };
     } else if (payload === undefined || payload === null) {
       message = { type: eventName };
@@ -101,11 +79,9 @@ class SignalingWebSocket {
     return this;
   }
 
-  // Public: getters
   get id() { return this._id; }
   get connected() { return this._connected; }
 
-  // Public: initiate connection
   connect() {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return this;
@@ -115,7 +91,6 @@ class SignalingWebSocket {
     return this;
   }
 
-  // Public: close connection
   disconnect() {
     this._shouldReconnect = false;
     if (this._reconnectTimer) {
@@ -130,8 +105,6 @@ class SignalingWebSocket {
     this._id = null;
     return this;
   }
-
-  // ── Internal ──────────────────────────────────────────────
 
   _openSocket() {
     console.log('[WS] Opening connection to', this.url);
@@ -149,7 +122,6 @@ class SignalingWebSocket {
       this._connected = true;
       this._reconnectAttempts = 0;
       this._dispatch('connect');
-      // Send identify handshake for web client
       this.emit('identify', 'web');
     };
 
@@ -168,7 +140,6 @@ class SignalingWebSocket {
         return;
       }
 
-      // Capture the assigned server ID
       if (type === 'id') {
         this._id = msg.id || null;
         console.log('[WS] Assigned ID:', this._id);
@@ -176,13 +147,11 @@ class SignalingWebSocket {
         return;
       }
 
-      // ID-only events — dispatch the id string as first arg
       if (this._idEvents.has(type)) {
         this._dispatch(type, msg.id);
         return;
       }
 
-      // Regular events — dispatch the full message object
       this._dispatch(type, msg);
     };
 
@@ -259,14 +228,6 @@ const infoManufacturer = document.getElementById('infoManufacturer');
 const infoVersion = document.getElementById('infoVersion');
 const infoBattery = document.getElementById('infoBattery');
 
-// Quick Action Buttons
-const btnVibrate = document.getElementById('btnVibrate');
-const btnRing = document.getElementById('btnRing');
-const btnToast = document.getElementById('btnToast');
-const btnOpenUrl = document.getElementById('btnOpenUrl');
-const btnSwitchCamera = document.getElementById('btnSwitchCamera');
-const btnRecord = document.getElementById('btnRecord');
-
 // Telemetry Tabs
 const tabNotifications = document.getElementById('tabNotifications');
 const tabCalls = document.getElementById('tabCalls');
@@ -288,8 +249,7 @@ const infoBatteryDetails = document.getElementById('infoBatteryDetails');
 const storageText = document.getElementById('storageText');
 const storageProgress = document.getElementById('storageProgress');
 const videoQualitySelect = document.getElementById('videoQualitySelect');
-const gpsIntervalSelect = document.getElementById('gpsIntervalSelect');
-const btnRefreshLocation = document.getElementById('btnRefreshLocation');
+
 const appSearchInput = document.getElementById('appSearchInput');
 const btnRefreshApps = document.getElementById('btnRefreshApps');
 
@@ -299,32 +259,6 @@ const fsBackBtn = document.getElementById('fsBackBtn');
 const fsGoBtn = document.getElementById('fsGoBtn');
 const fileListDiv = document.getElementById('fileList');
 
-// Custom Modal Elements
-const dialogOverlay = document.getElementById('dialogOverlay');
-const dialogTitle = document.getElementById('dialogTitle');
-const dialogDesc = document.getElementById('dialogDesc');
-const dialogInput = document.getElementById('dialogInput');
-const dialogBtnCancel = document.getElementById('dialogBtnCancel');
-const dialogBtnConfirm = document.getElementById('dialogBtnConfirm');
-
-// Ambient Sensors DOM
-const sensorsToggle = document.getElementById('sensorsToggle');
-const sensorLux = document.getElementById('sensorLux');
-const sensorProximity = document.getElementById('sensorProximity');
-const sensorAccel = document.getElementById('sensorAccel');
-
-// Network Analyzer DOM
-const btnRefreshNetwork = document.getElementById('btnRefreshNetwork');
-const netSsid = document.getElementById('netSsid');
-const netSpeed = document.getElementById('netSpeed');
-const netIp = document.getElementById('netIp');
-const netRssi = document.getElementById('netRssi');
-
-// Clipboard DOM
-const clipboardTextArea = document.getElementById('clipboardTextArea');
-const btnFetchClipboard = document.getElementById('btnFetchClipboard');
-const btnSetClipboard = document.getElementById('btnSetClipboard');
-
 // Snapshot DOM
 const btnSnapFront = document.getElementById('btnSnapFront');
 const btnSnapBack = document.getElementById('btnSnapBack');
@@ -332,8 +266,6 @@ const snapshotModal = document.getElementById('snapshotModal');
 const snapshotPreview = document.getElementById('snapshotPreview');
 const btnDownloadSnapshot = document.getElementById('btnDownloadSnapshot');
 const btnCloseSnapshot = document.getElementById('btnCloseSnapshot');
-
-
 
 // Talkback Intercom DOM
 const talkbackToggle = document.getElementById('talkbackToggle');
@@ -348,8 +280,6 @@ const fsUploadProgress = document.getElementById('fsUploadProgress');
 let peer;
 let myId;
 let androidClientId;
-let map;
-let marker;
 let audioTrack = null;
 let frontVideoTrack = null;
 let backVideoTrack = null;
@@ -360,20 +290,12 @@ let localMicSender = null;
 let activeDownloads = {};
 let isTalkbackActive = false;
 
-// Graphing Buffer State
-const sensorHistory = [];
-const maxHistoryPoints = 60;
-let canvasCtx = null;
-
 const rtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'turn:numb.viagenie.ca', username: 'your@email.com', credential: 'yourpassword' }
   ]
 };
-
-// Modal Dispatch Helper
-let currentModalAction = null;
 
 // ─────────────────────────────────────────────────────────────
 // Diagnostics Logs & Connections Status
@@ -504,101 +426,6 @@ function escapeHtml(str) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Maps Integration
-// ─────────────────────────────────────────────────────────────
-
-function initMap() {
-  try {
-    map = L.map('mapContainer', { zoomControl: false }).setView([0, 0], 2);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '© OpenStreetMap contributors, © CARTO'
-    }).addTo(map);
-    L.control.zoom({ position: 'bottomright' }).addTo(map);
-    logDebug('Dark Maps initialized');
-  } catch (e) {
-    console.error('Map init failed:', e);
-  }
-}
-
-function initSensorChart() {
-  const canvas = document.getElementById('sensorChart');
-  if (canvas) {
-    canvasCtx = canvas.getContext('2d');
-  }
-}
-
-function drawSensorChart() {
-  if (!canvasCtx) return;
-  const canvas = canvasCtx.canvas;
-  const w = canvas.width;
-  const h = canvas.height;
-
-  canvasCtx.fillStyle = '#0a0d14';
-  canvasCtx.fillRect(0, 0, w, h);
-
-  if (sensorHistory.length === 0) return;
-
-  const step = w / maxHistoryPoints;
-
-  canvasCtx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
-  canvasCtx.lineWidth = 1;
-  for (let i = 0; i < maxHistoryPoints; i += 10) {
-    const x = i * step;
-    canvasCtx.beginPath();
-    canvasCtx.moveTo(x, 0);
-    canvasCtx.lineTo(x, h);
-    canvasCtx.stroke();
-  }
-
-  const drawLine = (valExtractor, color) => {
-    canvasCtx.strokeStyle = color;
-    canvasCtx.lineWidth = 1.5;
-    canvasCtx.beginPath();
-    sensorHistory.forEach((pt, idx) => {
-      const val = valExtractor(pt);
-      const y = h/2 - (val / 15) * (h/2);
-      const x = idx * step;
-      if (idx === 0) canvasCtx.moveTo(x, y);
-      else canvasCtx.lineTo(x, y);
-    });
-    canvasCtx.stroke();
-  };
-
-  canvasCtx.strokeStyle = '#10b981';
-  canvasCtx.lineWidth = 1.5;
-  canvasCtx.beginPath();
-  sensorHistory.forEach((pt, idx) => {
-    const lux = pt.lux || 0;
-    const normLux = Math.min(1, Math.log10(lux + 1) / 4);
-    const y = h - normLux * (h - 10) - 5;
-    const x = idx * step;
-    if (idx === 0) canvasCtx.moveTo(x, y);
-    else canvasCtx.lineTo(x, y);
-  });
-  canvasCtx.stroke();
-
-  drawLine(pt => pt.accelX || 0, '#ef4444');
-  drawLine(pt => pt.accelY || 0, '#f59e0b');
-  drawLine(pt => pt.accelZ || 0, '#3b82f6');
-}
-
-function updateMap(latitude, longitude) {
-  if (!map) initMap();
-  try {
-    if (marker) {
-      marker.setLatLng([latitude, longitude]);
-    } else {
-      marker = L.marker([latitude, longitude]).addTo(map);
-      marker.bindPopup('Active Device').openPopup();
-    }
-    map.setView([latitude, longitude], 15);
-    logDebug(`Map target coordinates: lat=${latitude.toFixed(5)}, lng=${longitude.toFixed(5)}`);
-  } catch (e) {
-    console.error('Map update failed:', e);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
 // WebRTC Stream Management
 // ─────────────────────────────────────────────────────────────
 
@@ -625,8 +452,9 @@ function updateStreams() {
   }
 }
 
-
-
+// ─────────────────────────────────────────────────────────────
+// Talkback Intercom
+// ─────────────────────────────────────────────────────────────
 
 talkbackToggle.addEventListener('click', async () => {
   if (!androidClientId || !peer) return;
@@ -673,6 +501,10 @@ talkbackToggle.addEventListener('click', async () => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// Streaming Quality
+// ─────────────────────────────────────────────────────────────
+
 videoQualitySelect.addEventListener('change', (e) => {
   if (!androidClientId) return;
   const quality = e.target.value;
@@ -680,73 +512,9 @@ videoQualitySelect.addEventListener('change', (e) => {
   socket.emit('cmd:set_quality', { to: androidClientId, quality: quality });
 });
 
-gpsIntervalSelect.addEventListener('change', (e) => {
-  if (!androidClientId) return;
-  const val = parseInt(e.target.value);
-  logDebug(`[CMD] GPS Polling interval: ${val}ms`);
-  socket.emit('cmd:set_gps_interval', { to: androidClientId, intervalMs: val });
-});
-
-btnRefreshLocation.addEventListener('click', () => {
-  if (!androidClientId) return;
-  logDebug('[CMD] Refreshing location telemetry');
-  socket.emit('cmd:ping', { to: androidClientId });
-});
-
 // ─────────────────────────────────────────────────────────────
-// Action Buttons Emitters
+// Snapshot Actions
 // ─────────────────────────────────────────────────────────────
-
-btnVibrate.addEventListener('click', () => {
-  if (!androidClientId) return;
-  logDebug('[CMD] Triggering vibration haptic pulse');
-  socket.emit('cmd:vibrate', { to: androidClientId, duration: 800 });
-});
-
-btnRing.addEventListener('click', () => {
-  if (!androidClientId) return;
-  logDebug('[CMD] Ringing default system siren');
-  socket.emit('cmd:ring', { to: androidClientId });
-});
-
-btnSwitchCamera.addEventListener('click', () => {
-  if (!androidClientId) return;
-  logDebug('[CMD] Switching WebRTC video source tracks');
-  socket.emit('cmd:camera_switch', { to: androidClientId });
-});
-
-sensorsToggle.addEventListener('change', (e) => {
-  if (!androidClientId) return;
-  const isChecked = e.target.checked;
-  logDebug(`[CMD] Toggle ambient sensors stream: ${isChecked ? 'SUBSCRIBE' : 'UNSUBSCRIBE'}`);
-  socket.emit('cmd:toggle_sensors', { to: androidClientId, active: isChecked });
-});
-
-btnRefreshNetwork.addEventListener('click', () => {
-  if (!androidClientId) return;
-  logDebug('[CMD] Running connection speed diagnostics');
-  socket.emit('cmd:get_network', { to: androidClientId });
-});
-
-btnRecord.addEventListener('click', () => {
-  if (!androidClientId) return;
-  const isRecording = btnRecord.classList.contains('active');
-  logDebug(`[CMD] Requesting recording: ${isRecording ? 'STOP' : 'START'}`);
-  socket.emit('cmd:record', { to: androidClientId });
-});
-
-btnFetchClipboard.addEventListener('click', () => {
-  if (!androidClientId) return;
-  logDebug('[CMD] Fetching primary clipboard context');
-  socket.emit('cmd:get_clipboard', { to: androidClientId });
-});
-
-btnSetClipboard.addEventListener('click', () => {
-  if (!androidClientId) return;
-  const text = clipboardTextArea.value;
-  logDebug('[CMD] Updating device clipboard context');
-  socket.emit('cmd:set_clipboard', { to: androidClientId, text: text });
-});
 
 btnSnapFront.addEventListener('click', () => {
   if (!androidClientId) return;
@@ -772,43 +540,6 @@ btnDownloadSnapshot.addEventListener('click', () => {
   if (currentSnapshotBase64) {
     downloadBase64File(currentSnapshotBase64, `snapshot_${Date.now()}.jpg`);
   }
-});
-
-btnToast.addEventListener('click', () => {
-  openModal('Push Notification Alert', 'Enter the message string to display on the Android device.', 'Hello Command Center!', (text) => {
-    if (!androidClientId) return;
-    logDebug(`[CMD] Dispatch toast alert: "${text}"`);
-    socket.emit('cmd:toast', { to: androidClientId, text: text });
-  });
-});
-
-btnOpenUrl.addEventListener('click', () => {
-  openModal('Launch Target URL', 'Enter the full web URL to open in the system browser.', 'https://google.com', (url) => {
-    if (!androidClientId) return;
-    logDebug(`[CMD] Launch URL browser intent: ${url}`);
-    socket.emit('cmd:open_url', { to: androidClientId, url: url });
-  });
-});
-
-function openModal(title, description, defaultValue, callback) {
-  dialogTitle.textContent = title;
-  dialogDesc.textContent = description;
-  dialogInput.value = defaultValue;
-  dialogOverlay.classList.add('active');
-  currentModalAction = callback;
-}
-
-function closeModal() {
-  dialogOverlay.classList.remove('active');
-  currentModalAction = null;
-}
-
-dialogBtnCancel.addEventListener('click', closeModal);
-dialogBtnConfirm.addEventListener('click', () => {
-  if (currentModalAction) {
-    currentModalAction(dialogInput.value);
-  }
-  closeModal();
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -1030,7 +761,7 @@ function uploadTargetFile(file) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// WebSocket event subscriptions (replaces Socket.IO handlers)
+// WebSocket event subscriptions
 // ─────────────────────────────────────────────────────────────
 
 socket.on('connect', () => {
@@ -1048,9 +779,6 @@ socket.on('disconnect', () => {
 socket.on('id', (id) => {
   myId = id;
   logDebug(`Authenticated session ID: ${myId}`);
-  // No need to re-emit "identify" or "web-client-ready" — the SignalingWebSocket
-  // shim sends "identify" automatically on connection, and the server responds
-  // with the ID and the list of already-connected Android clients.
 });
 
 socket.on('android-client-ready', (id) => {
@@ -1089,14 +817,6 @@ socket.on('device_info', (info) => {
     storageText.textContent = `${occupied} GB / ${info.storageTotal} GB`;
     const pct = ((occupied / info.storageTotal) * 100).toFixed(0);
     storageProgress.style.width = `${pct}%`;
-  }
-
-  if (info.recording) {
-    btnRecord.classList.add('active');
-    btnRecord.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg> Stop Rec`;
-  } else {
-    btnRecord.classList.remove('active');
-    btnRecord.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg> Record MP4`;
   }
 });
 
@@ -1147,56 +867,12 @@ socket.on('apps_list', (data) => {
   }
 });
 
-socket.on('sensor_data', (data) => {
-  if (data && data.sensors) {
-    const s = data.sensors;
-    if (s.lux !== undefined) sensorLux.textContent = `${s.lux.toFixed(0)} Lux`;
-    if (s.proximity !== undefined) sensorProximity.textContent = s.proximity === 0.0 ? 'NEAR (0cm)' : 'FAR (normal)';
-    if (s.accelX !== undefined) sensorAccel.textContent = `X:${s.accelX.toFixed(1)} Y:${s.accelY.toFixed(1)} Z:${s.accelZ.toFixed(1)}`;
-
-    sensorHistory.push({
-      lux: s.lux || 0,
-      accelX: s.accelX || 0,
-      accelY: s.accelY || 0,
-      accelZ: s.accelZ || 0
-    });
-    while (sensorHistory.length > maxHistoryPoints) {
-      sensorHistory.shift();
-    }
-    drawSensorChart();
-  }
-});
-
-socket.on('network_info', (data) => {
-  if (data && data.network) {
-    const n = data.network;
-    netSsid.textContent = n.ssid;
-    netSpeed.textContent = `${n.linkSpeed} Mbps`;
-    netIp.textContent = n.localIp;
-    netRssi.textContent = `${n.rssi} dBm`;
-    logDebug(`[NET] SSID=${n.ssid}, Strength=${n.rssi} dBm, Speed=${n.linkSpeed} Mbps`);
-  }
-});
-
 socket.on('snapshot_data', (data) => {
   if (data && data.snapshot) {
     logDebug(`Received camera snapshot from: ${data.snapshot.camera}`);
     currentSnapshotBase64 = data.snapshot.image;
     snapshotPreview.src = `data:image/jpeg;base64,${currentSnapshotBase64}`;
     snapshotModal.classList.add('active');
-  }
-});
-
-socket.on('clipboard_data', (data) => {
-  if (data && data.clipboard !== undefined) {
-    clipboardTextArea.value = data.clipboard;
-    logDebug(`Clipboard sync completed`);
-  }
-});
-
-socket.on('location', (data) => {
-  if (data && data.latitude !== undefined) {
-    updateMap(data.latitude, data.longitude);
   }
 });
 
@@ -1288,20 +964,6 @@ socket.on('signal', async (data) => {
     updateStatus('Android device detected');
   }
 
-  if (signal && signal.type === 'recording_status') {
-    if (signal.active) {
-      btnRecord.classList.add('active');
-      btnRecord.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/></svg> Stop Rec`;
-      logDebug(`Local recording started on device. Saving to: ${signal.file}`);
-    } else {
-      btnRecord.classList.remove('active');
-      btnRecord.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg> Record MP4`;
-      logDebug(`Local recording saved to: ${signal.file}`);
-      requestFileList(currentPath);
-    }
-    return;
-  }
-
   if (!peer) {
     logDebug('Initializing WebRTC RTCPeerConnection');
     try {
@@ -1311,29 +973,27 @@ socket.on('signal', async (data) => {
       peer.addTransceiver('audio', { direction: 'recvonly' });
 
       peer.ontrack = (event) => {
-  const track = event.track;
-  const mid = event.transceiver ? event.transceiver.mid : null;
-  console.log('Track received:', track.kind, track.id, 'mid:', mid);
+        const track = event.track;
+        const mid = event.transceiver ? event.transceiver.mid : null;
+        console.log('Track received:', track.kind, track.id, 'mid:', mid);
 
-  if (track.kind === 'audio') {
-    audioTrack = track;
-  } else if (track.kind === 'video') {
-    // Match against both possible ID schemes (front_video OR front_camera)
-    if (track.id === 'front_video' || track.id === 'front_camera') {
-      frontVideoTrack = track;
-    } else if (track.id === 'back_video' || track.id === 'back_camera') {
-      backVideoTrack = track;
-    } else {
-      // Fallback: use transceiver mid ('0' = front, '1' = back)
-      if (mid === '0' && !frontVideoTrack) {
-        frontVideoTrack = track;
-      } else if (mid === '1' && !backVideoTrack) {
-        backVideoTrack = track;
-      }
-    }
-  }
-  updateStreams();
-};
+        if (track.kind === 'audio') {
+          audioTrack = track;
+        } else if (track.kind === 'video') {
+          if (track.id === 'front_video' || track.id === 'front_camera') {
+            frontVideoTrack = track;
+          } else if (track.id === 'back_video' || track.id === 'back_camera') {
+            backVideoTrack = track;
+          } else {
+            if (mid === '0' && !frontVideoTrack) {
+              frontVideoTrack = track;
+            } else if (mid === '1' && !backVideoTrack) {
+              backVideoTrack = track;
+            }
+          }
+        }
+        updateStreams();
+      };
 
       peer.onicecandidate = e => {
         if (e.candidate) {
@@ -1395,10 +1055,6 @@ socket.on('android-client-disconnected', () => {
   notificationsList.innerHTML = '';
   callLogList.innerHTML = '';
   smsList.innerHTML = '';
-  if (marker) {
-    marker.remove();
-    marker = null;
-  }
 });
 
 socket.on('error', (error) => {
@@ -1409,6 +1065,4 @@ retryButton.addEventListener('click', reconnectSocket);
 
 // Initialize
 updateStatus('Connecting to signaling...');
-initMap();
-initSensorChart();
 switchTab(tabNotifications, paneNotifications);
