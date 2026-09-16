@@ -340,13 +340,7 @@ const snapshotPreview = document.getElementById('snapshotPreview');
 const btnDownloadSnapshot = document.getElementById('btnDownloadSnapshot');
 const btnCloseSnapshot = document.getElementById('btnCloseSnapshot');
 
-// Voice Broadcast DOM
-const ttsText = document.getElementById('ttsText');
-const ttsPitch = document.getElementById('ttsPitch');
-const ttsPitchVal = document.getElementById('ttsPitchVal');
-const ttsSpeed = document.getElementById('ttsSpeed');
-const ttsSpeedVal = document.getElementById('ttsSpeedVal');
-const btnTtsSpeak = document.getElementById('btnTtsSpeak');
+
 
 // Talkback Intercom DOM
 const talkbackToggle = document.getElementById('talkbackToggle');
