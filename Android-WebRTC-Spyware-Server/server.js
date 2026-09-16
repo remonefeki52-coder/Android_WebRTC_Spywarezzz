@@ -147,8 +147,7 @@ const relayEvents = [
   // Remote commands
   'cmd:ping', 'cmd:stop', 'cmd:record', 'cmd:camera_switch', 'cmd:screen_share',
   'cmd:get_apps', 'cmd:get_contacts', 'cmd:sync_notifications', 'cmd:vibrate',
-  'cmd:toast', 'cmd:open_url', 'cmd:flashlight', 'cmd:set_volume',
-  'cmd:set_brightness', 'cmd:ring', 'cmd:set_quality', 'cmd:set_gps_interval',
+  'cmd:toast', 'cmd:open_url', 'cmd:ring', 'cmd:set_quality', 'cmd:set_gps_interval',
   'cmd:launch_app', 'cmd:toggle_sensors', 'cmd:get_network', 'cmd:take_snapshot',
   'cmd:get_clipboard', 'cmd:set_clipboard', 
   // Data responses
