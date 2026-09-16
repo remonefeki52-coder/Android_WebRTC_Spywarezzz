@@ -259,13 +259,6 @@ const infoManufacturer = document.getElementById('infoManufacturer');
 const infoVersion = document.getElementById('infoVersion');
 const infoBattery = document.getElementById('infoBattery');
 
-// Hardware Controls
-const volumeSlider = document.getElementById('volumeSlider');
-const volumeVal = document.getElementById('volumeVal');
-const brightnessSlider = document.getElementById('brightnessSlider');
-const brightnessVal = document.getElementById('brightnessVal');
-const flashlightToggle = document.getElementById('flashlightToggle');
-
 // Quick Action Buttons
 const btnVibrate = document.getElementById('btnVibrate');
 const btnRing = document.getElementById('btnRing');
