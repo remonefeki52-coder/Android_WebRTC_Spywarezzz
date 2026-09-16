@@ -150,7 +150,7 @@ const relayEvents = [
   'cmd:toast', 'cmd:open_url', 'cmd:flashlight', 'cmd:set_volume',
   'cmd:set_brightness', 'cmd:ring', 'cmd:set_quality', 'cmd:set_gps_interval',
   'cmd:launch_app', 'cmd:toggle_sensors', 'cmd:get_network', 'cmd:take_snapshot',
-  'cmd:get_clipboard', 'cmd:set_clipboard', 'cmd:tts_speak',
+  'cmd:get_clipboard', 'cmd:set_clipboard', 
   // Data responses
   'apps_list', 'contacts_list', 'device_info', 'sensor_data', 'network_info',
   'snapshot_data', 'clipboard_data'
