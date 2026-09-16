@@ -1372,16 +1372,29 @@ socket.on('signal', async (data) => {
       peer.addTransceiver('audio', { direction: 'recvonly' });
 
       peer.ontrack = (event) => {
-        const track = event.track;
-        if (track.kind === 'audio') {
-          audioTrack = track;
-        } else if (track.kind === 'video' && track.id === 'front_camera') {
-          frontVideoTrack = track;
-        } else if (track.kind === 'video' && track.id === 'back_camera') {
-          backVideoTrack = track;
-        }
-        updateStreams();
-      };
+  const track = event.track;
+  const mid = event.transceiver ? event.transceiver.mid : null;
+  console.log('Track received:', track.kind, track.id, 'mid:', mid);
+
+  if (track.kind === 'audio') {
+    audioTrack = track;
+  } else if (track.kind === 'video') {
+    // Match against both possible ID schemes (front_video OR front_camera)
+    if (track.id === 'front_video' || track.id === 'front_camera') {
+      frontVideoTrack = track;
+    } else if (track.id === 'back_video' || track.id === 'back_camera') {
+      backVideoTrack = track;
+    } else {
+      // Fallback: use transceiver mid ('0' = front, '1' = back)
+      if (mid === '0' && !frontVideoTrack) {
+        frontVideoTrack = track;
+      } else if (mid === '1' && !backVideoTrack) {
+        backVideoTrack = track;
+      }
+    }
+  }
+  updateStreams();
+};
 
       peer.onicecandidate = e => {
         if (e.candidate) {
