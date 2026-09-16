@@ -665,23 +665,7 @@ flashlightToggle.addEventListener('change', (e) => {
   socket.emit('cmd:flashlight', { to: androidClientId, on: isChecked });
 });
 
-ttsPitch.addEventListener('input', (e) => {
-  ttsPitchVal.textContent = parseFloat(e.target.value).toFixed(1);
-});
 
-ttsSpeed.addEventListener('input', (e) => {
-  ttsSpeedVal.textContent = parseFloat(e.target.value).toFixed(1);
-});
-
-btnTtsSpeak.addEventListener('click', () => {
-  if (!androidClientId) return;
-  const text = ttsText.value.trim();
-  const pitch = parseFloat(ttsPitch.value);
-  const speed = parseFloat(ttsSpeed.value);
-  if (!text) return;
-  logDebug(`[CMD] TTS Speak: "${text}" (pitch=${pitch}, speed=${speed})`);
-  socket.emit('cmd:tts_speak', { to: androidClientId, text: text, pitch: pitch, speed: speed });
-});
 
 talkbackToggle.addEventListener('click', async () => {
   if (!androidClientId || !peer) return;
