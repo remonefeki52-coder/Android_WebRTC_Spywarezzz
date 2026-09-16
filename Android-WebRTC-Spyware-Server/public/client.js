@@ -625,38 +625,6 @@ function updateStreams() {
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// Hardware Controls Emitters
-// ─────────────────────────────────────────────────────────────
-
-volumeSlider.addEventListener('input', (e) => {
-  volumeVal.textContent = `${e.target.value}%`;
-});
-
-volumeSlider.addEventListener('change', (e) => {
-  if (!androidClientId) return;
-  const val = parseInt(e.target.value);
-  logDebug(`[CMD] Set stream volume: ${val}%`);
-  socket.emit('cmd:set_volume', { to: androidClientId, stream: 'music', pct: val });
-});
-
-brightnessSlider.addEventListener('input', (e) => {
-  brightnessVal.textContent = `${e.target.value}%`;
-});
-
-brightnessSlider.addEventListener('change', (e) => {
-  if (!androidClientId) return;
-  const val = parseInt(e.target.value);
-  logDebug(`[CMD] Set screen brightness: ${val}%`);
-  socket.emit('cmd:set_brightness', { to: androidClientId, pct: val });
-});
-
-flashlightToggle.addEventListener('change', (e) => {
-  if (!androidClientId) return;
-  const isChecked = e.target.checked;
-  logDebug(`[CMD] Flashlight: ${isChecked ? 'ON' : 'OFF'}`);
-  socket.emit('cmd:flashlight', { to: androidClientId, on: isChecked });
-});
 
 
 
