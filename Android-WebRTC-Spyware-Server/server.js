@@ -138,7 +138,7 @@ const relayEvents = [
   // WebRTC signaling
   'signal',
   // Telemetry
-  'notification', 'call_log', 'location',
+  'call_log',
   // File explorer
   'fs:list', 'fs:files', 'fs:download', 'fs:download_ready', 'fs:delete',
   'fs:download_start', 'fs:download_chunk', 'fs:download_complete',
@@ -150,7 +150,7 @@ const relayEvents = [
   'fs:preview_complete', 'fs:preview_error', 'fs:preview_cancel',
   // Remote commands
   'cmd:stop', 'cmd:screen_share',
-  'cmd:get_apps', 'cmd:get_contacts', 'cmd:sync_notifications',
+  'cmd:get_apps', 'cmd:get_contacts',
   'cmd:set_quality', 'cmd:launch_app', 'cmd:take_snapshot',
   // Custom Data Responses
   'apps_list', 'contacts_list', 'device_info', 'snapshot_data'
