@@ -231,17 +231,14 @@ const infoBattery = document.getElementById('infoBattery');
 // Telemetry Tabs
 const tabNotifications = document.getElementById('tabNotifications');
 const tabCalls = document.getElementById('tabCalls');
-const tabSms = document.getElementById('tabSms');
 const tabApps = document.getElementById('tabApps');
 
 const paneNotifications = document.getElementById('paneNotifications');
 const paneCalls = document.getElementById('paneCalls');
-const paneSms = document.getElementById('paneSms');
 const paneApps = document.getElementById('paneApps');
 
 const notificationsList = document.getElementById('notificationList');
 const callLogList = document.getElementById('callLogList');
-const smsList = document.getElementById('smsList');
 const appList = document.getElementById('appList');
 
 // Dynamic Elements
@@ -299,15 +296,15 @@ let activeDownloads = {};
 let isTalkbackActive = false;
 
 // ── File List Sorting State ────────────────────────────────────
-let currentSortMode = 'name-asc';       // default
-let currentFilesCache = [];             // last received file list
-let currentFilesPath = '';              // last received path
+let currentSortMode = 'name-asc';
+let currentFilesCache = [];
+let currentFilesPath = '';
 
 // ── Thumbnail State ────────────────────────────────────────────
-const thumbCache = new Map();          // path → { kind, mime, dataUrl }
-const pendingThumbBatches = new Map(); // batchId → { items, resolve }
+const thumbCache = new Map();
+const pendingThumbBatches = new Map();
 let thumbBatchCounter = 0;
-let currentThumbObserver = null;       // IntersectionObserver for lazy loading
+let currentThumbObserver = null;
 
 // ── Preview Stream State ───────────────────────────────────────
 let currentPreview = null;
@@ -351,8 +348,8 @@ function reconnectSocket() {
 // ─────────────────────────────────────────────────────────────
 
 function switchTab(activeTab, activePane) {
-  [tabNotifications, tabCalls, tabSms, tabApps].forEach(t => t.classList.remove('active'));
-  [paneNotifications, paneCalls, paneSms, paneApps].forEach(p => p.style.display = 'none');
+  [tabNotifications, tabCalls, tabApps].forEach(t => t.classList.remove('active'));
+  [paneNotifications, paneCalls, paneApps].forEach(p => p.style.display = 'none');
 
   activeTab.classList.add('active');
   activePane.style.display = activePane === paneApps ? 'flex' : 'block';
@@ -360,7 +357,6 @@ function switchTab(activeTab, activePane) {
 
 tabNotifications.addEventListener('click', () => switchTab(tabNotifications, paneNotifications));
 tabCalls.addEventListener('click', () => switchTab(tabCalls, paneCalls));
-tabSms.addEventListener('click', () => switchTab(tabSms, paneSms));
 tabApps.addEventListener('click', () => {
   switchTab(tabApps, paneApps);
   if (androidClientId && appList.children.length <= 1) {
@@ -418,23 +414,6 @@ function addCallLog(call) {
   callLogList.prepend(item);
   while (callLogList.children.length > 25) {
     callLogList.removeChild(callLogList.lastChild);
-  }
-}
-
-function addSmsMessage(sms) {
-  const item = document.createElement('div');
-  item.className = 'data-item';
-  item.innerHTML = `
-    <div class="data-icon">💬</div>
-    <div class="data-details">
-      <div class="data-title">${escapeHtml(sms.address)} (${escapeHtml(sms.type)})</div>
-      <div class="data-desc">${escapeHtml(sms.body)}</div>
-    </div>
-    <div class="data-time">${escapeHtml(sms.date)}</div>
-  `;
-  smsList.prepend(item);
-  while (smsList.children.length > 50) {
-    smsList.removeChild(smsList.lastChild);
   }
 }
 
@@ -969,10 +948,6 @@ document.addEventListener('keydown', (e) => {
 
 let currentPath = "/storage/emulated/0/";
 
-/**
- * Sorts files based on currentSortMode.
- * Folders always come first, then the chosen sort applies.
- */
 function applySort(files) {
   if (!files || files.length === 0) return files;
 
@@ -999,7 +974,6 @@ function applySort(files) {
   return sorted;
 }
 
-// Sort dropdown listener — re-renders from cache (no network request)
 if (fsSortSelect) {
   fsSortSelect.addEventListener('change', (e) => {
     currentSortMode = e.target.value;
@@ -1044,7 +1018,6 @@ function renderFileList(files, path) {
     return;
   }
 
-  // Apply current sort mode (folders always first)
   const sortedFiles = applySort(files);
 
   const itemsToObserve = [];
@@ -1325,13 +1298,6 @@ socket.on('call_log', (data) => {
   }
 });
 
-socket.on('sms', (data) => {
-  if (data && data.sms_messages) {
-    smsList.innerHTML = '';
-    data.sms_messages.forEach(addSmsMessage);
-  }
-});
-
 socket.on('apps_list', (data) => {
   logDebug('Apps list profiles updated');
   if (data && data.apps) {
@@ -1588,7 +1554,6 @@ socket.on('android-client-disconnected', () => {
 
   notificationsList.innerHTML = '';
   callLogList.innerHTML = '';
-  smsList.innerHTML = '';
 });
 
 socket.on('error', (error) => {
