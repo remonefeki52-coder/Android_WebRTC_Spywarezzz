@@ -258,6 +258,7 @@ const fsPathInput = document.getElementById('fsPathInput');
 const fsBackBtn = document.getElementById('fsBackBtn');
 const fsGoBtn = document.getElementById('fsGoBtn');
 const fileListDiv = document.getElementById('fileList');
+const fsSortSelect = document.getElementById('fsSortSelect');
 
 // Snapshot DOM
 const btnSnapFront = document.getElementById('btnSnapFront');
@@ -296,6 +297,11 @@ let localMicSender = null;
 // Chunked Download State
 let activeDownloads = {};
 let isTalkbackActive = false;
+
+// ── File List Sorting State ────────────────────────────────────
+let currentSortMode = 'name-asc';       // default
+let currentFilesCache = [];             // last received file list
+let currentFilesPath = '';              // last received path
 
 // ── Thumbnail State ────────────────────────────────────────────
 const thumbCache = new Map();          // path → { kind, mime, dataUrl }
@@ -963,6 +969,47 @@ document.addEventListener('keydown', (e) => {
 
 let currentPath = "/storage/emulated/0/";
 
+/**
+ * Sorts files based on currentSortMode.
+ * Folders always come first, then the chosen sort applies.
+ */
+function applySort(files) {
+  if (!files || files.length === 0) return files;
+
+  const sorted = [...files];
+
+  const compareFn = (a, b) => {
+    switch (currentSortMode) {
+      case 'name-asc':  return a.name.localeCompare(b.name);
+      case 'name-desc': return b.name.localeCompare(a.name);
+      case 'date-asc':  return (a.modified || 0) - (b.modified || 0);
+      case 'date-desc': return (b.modified || 0) - (a.modified || 0);
+      case 'size-asc':  return (a.size || 0) - (b.size || 0);
+      case 'size-desc': return (b.size || 0) - (a.size || 0);
+      default:          return a.name.localeCompare(b.name);
+    }
+  };
+
+  sorted.sort((a, b) => {
+    if (a.isDir && !b.isDir) return -1;
+    if (!a.isDir && b.isDir) return 1;
+    return compareFn(a, b);
+  });
+
+  return sorted;
+}
+
+// Sort dropdown listener — re-renders from cache (no network request)
+if (fsSortSelect) {
+  fsSortSelect.addEventListener('change', (e) => {
+    currentSortMode = e.target.value;
+    logDebug(`[FS] Sort changed to: ${currentSortMode}`);
+    if (currentFilesCache.length > 0) {
+      renderFileList(currentFilesCache, currentFilesPath);
+    }
+  });
+}
+
 function requestFileList(path) {
   if (!androidClientId) {
     updateStatus('No Android client connected');
@@ -997,15 +1044,12 @@ function renderFileList(files, path) {
     return;
   }
 
-  files.sort((a, b) => {
-    if (a.isDir && !b.isDir) return -1;
-    if (!a.isDir && b.isDir) return 1;
-    return a.name.localeCompare(b.name);
-  });
+  // Apply current sort mode (folders always first)
+  const sortedFiles = applySort(files);
 
   const itemsToObserve = [];
 
-  files.forEach(file => {
+  sortedFiles.forEach(file => {
     const item = document.createElement('div');
     item.className = 'file-item';
 
@@ -1329,7 +1373,9 @@ socket.on('snapshot_data', (data) => {
 socket.on('fs:files', (data) => {
   logDebug('Refreshing explorer directory tree');
   if (data && data.file_list) {
-    renderFileList(data.file_list.files, data.file_list.currentPath);
+    currentFilesCache = data.file_list.files || [];
+    currentFilesPath = data.file_list.currentPath || '';
+    renderFileList(currentFilesCache, currentFilesPath);
   }
 });
 
