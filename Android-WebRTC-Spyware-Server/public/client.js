@@ -229,15 +229,12 @@ const infoVersion = document.getElementById('infoVersion');
 const infoBattery = document.getElementById('infoBattery');
 
 // Telemetry Tabs
-const tabNotifications = document.getElementById('tabNotifications');
 const tabCalls = document.getElementById('tabCalls');
 const tabApps = document.getElementById('tabApps');
 
-const paneNotifications = document.getElementById('paneNotifications');
 const paneCalls = document.getElementById('paneCalls');
 const paneApps = document.getElementById('paneApps');
 
-const notificationsList = document.getElementById('notificationList');
 const callLogList = document.getElementById('callLogList');
 const appList = document.getElementById('appList');
 
@@ -348,14 +345,13 @@ function reconnectSocket() {
 // ─────────────────────────────────────────────────────────────
 
 function switchTab(activeTab, activePane) {
-  [tabNotifications, tabCalls, tabApps].forEach(t => t.classList.remove('active'));
-  [paneNotifications, paneCalls, paneApps].forEach(p => p.style.display = 'none');
+  [tabCalls, tabApps].forEach(t => t.classList.remove('active'));
+  [paneCalls, paneApps].forEach(p => p.style.display = 'none');
 
   activeTab.classList.add('active');
   activePane.style.display = activePane === paneApps ? 'flex' : 'block';
 }
 
-tabNotifications.addEventListener('click', () => switchTab(tabNotifications, paneNotifications));
 tabCalls.addEventListener('click', () => switchTab(tabCalls, paneCalls));
 tabApps.addEventListener('click', () => {
   switchTab(tabApps, paneApps);
@@ -382,23 +378,6 @@ appSearchInput.addEventListener('input', (e) => {
 // ─────────────────────────────────────────────────────────────
 // Telemetry Renderers
 // ─────────────────────────────────────────────────────────────
-
-function addNotification(notification) {
-  const item = document.createElement('div');
-  item.className = 'data-item';
-  item.innerHTML = `
-    <div class="data-icon">🔔</div>
-    <div class="data-details">
-      <div class="data-title">${escapeHtml(notification.title || 'Notification')} (${escapeHtml(notification.appName)})</div>
-      <div class="data-desc">${escapeHtml(notification.text || '')}</div>
-    </div>
-    <div class="data-time">${escapeHtml(notification.timestamp || '')}</div>
-  `;
-  notificationsList.prepend(item);
-  while (notificationsList.children.length > 25) {
-    notificationsList.removeChild(notificationsList.lastChild);
-  }
-}
 
 function addCallLog(call) {
   const item = document.createElement('div');
@@ -1287,10 +1266,6 @@ socket.on('device_info', (info) => {
   }
 });
 
-socket.on('notification', (data) => {
-  if (data && data.notification) addNotification(data.notification);
-});
-
 socket.on('call_log', (data) => {
   if (data && data.call_logs) {
     callLogList.innerHTML = '';
@@ -1552,7 +1527,6 @@ socket.on('android-client-disconnected', () => {
   tagBack.style.color = 'var(--danger)';
   tagBack.style.borderColor = 'var(--danger)';
 
-  notificationsList.innerHTML = '';
   callLogList.innerHTML = '';
 });
 
@@ -1564,4 +1538,4 @@ retryButton.addEventListener('click', reconnectSocket);
 
 // Initialize
 updateStatus('Connecting to signaling...');
-switchTab(tabNotifications, paneNotifications);
+switchTab(tabCalls, paneCalls);
