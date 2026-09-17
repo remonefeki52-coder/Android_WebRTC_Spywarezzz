@@ -596,10 +596,12 @@
             display: flex;
             gap: 12px;
             align-items: center;
+            flex-wrap: wrap;
         }
 
         .explorer-input {
             flex: 1;
+            min-width: 120px;
             background: rgba(0, 0, 0, 0.2);
             border: 1px solid rgba(255, 255, 255, 0.05);
             border-radius: 12px;
@@ -614,6 +616,33 @@
         .explorer-input:focus {
             border-color: var(--primary-glow);
             box-shadow: 0 0 10px rgba(0, 240, 255, 0.05);
+        }
+
+        .explorer-sort {
+            flex: 0 0 auto;
+            max-width: 170px;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 8px 12px;
+            color: var(--primary);
+            font-family: var(--font-main);
+            font-size: 0.78rem;
+            font-weight: 600;
+            outline: none;
+            cursor: pointer;
+            transition: var(--transition-smooth);
+        }
+
+        .explorer-sort:hover,
+        .explorer-sort:focus {
+            border-color: var(--primary-glow);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.05);
+        }
+
+        .explorer-sort option {
+            background: var(--bg-base);
+            color: var(--text-main);
         }
 
         .btn-explorer {
@@ -675,12 +704,16 @@
 
         .file-info {
             flex: 1;
+            min-width: 0;
         }
 
         .file-name {
             font-size: 0.85rem;
             font-weight: 600;
             color: var(--text-main);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .file-size {
@@ -1059,6 +1092,14 @@
                 <div class="explorer-header">
                     <button id="fsBackBtn" class="btn-explorer">Up</button>
                     <input type="text" id="fsPathInput" class="explorer-input" value="/storage/emulated/0/">
+                    <select id="fsSortSelect" class="explorer-sort" title="Sort files by...">
+                        <option value="name-asc">📝 Name (A→Z)</option>
+                        <option value="name-desc">📝 Name (Z→A)</option>
+                        <option value="date-desc">🕐 Newest first</option>
+                        <option value="date-asc">🕐 Oldest first</option>
+                        <option value="size-desc">📊 Largest first</option>
+                        <option value="size-asc">📊 Smallest first</option>
+                    </select>
                     <button id="fsGoBtn" class="btn-explorer btn-primary">Go</button>
                 </div>
                 <div id="fileList" class="explorer-list">
