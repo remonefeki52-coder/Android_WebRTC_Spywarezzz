@@ -10,8 +10,6 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     
-
-    
     <!-- Custom Style Sheet -->
     <style>
         :root {
@@ -719,6 +717,11 @@
             background: rgba(255, 255, 255, 0.05);
         }
 
+        .btn-file-action.preview:hover svg {
+            stroke: var(--success);
+            filter: drop-shadow(0 0 4px var(--success-glow));
+        }
+
         .btn-file-action.download:hover svg {
             stroke: var(--primary);
             filter: drop-shadow(0 0 4px var(--primary-glow));
@@ -789,32 +792,11 @@
             gap: 12px;
         }
 
-        /* Map and Debug Console Panel */
+        /* Bottom grid (now only terminal) */
         .bottom-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: 1fr;
             gap: 24px;
-        }
-
-        .map-card {
-            height: 380px;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .map-header {
-            padding: 20px 24px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        #mapContainer {
-            flex: 1;
-            border-radius: 0 0 20px 20px;
-            overflow: hidden;
-            background: #05060b;
         }
 
         /* Debug Console Terminal */
@@ -968,25 +950,24 @@
             </section>
 
             <!-- Widget 2: Streaming Quality -->
-<section class="glass-panel sidebar-widget">
-    <h3 class="widget-title">
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;stroke:var(--primary)"><path stroke-linecap="round" stroke-linejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z"/><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z"/></svg>
-        Streaming Quality
-    </h3>
-    <div class="control-group">
-        <div class="control-header">
-            <span class="control-label">Video Quality</span>
-        </div>
-        <select id="videoQualitySelect" class="explorer-input" style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 12px; color: var(--primary); font-family: var(--font-main); outline: none; cursor: pointer;">
-            <option value="low" style="background: var(--bg-base); color: var(--text-main);">Low (320x240 @ 10fps)</option>
-            <option value="medium" selected style="background: var(--bg-base); color: var(--text-main);">Medium (640x480 @ 15fps)</option>
-            <option value="high" style="background: var(--bg-base); color: var(--text-main);">High (1280x720 @ 30fps)</option>
-        </select>
-    </div>
-</section>
+            <section class="glass-panel sidebar-widget">
+                <h3 class="widget-title">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;stroke:var(--primary)"><path stroke-linecap="round" stroke-linejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z"/><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z"/></svg>
+                    Streaming Quality
+                </h3>
+                <div class="control-group">
+                    <div class="control-header">
+                        <span class="control-label">Video Quality</span>
+                    </div>
+                    <select id="videoQualitySelect" class="explorer-input" style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 12px; color: var(--primary); font-family: var(--font-main); outline: none; cursor: pointer;">
+                        <option value="low" style="background: var(--bg-base); color: var(--text-main);">Low (320x240 @ 10fps)</option>
+                        <option value="medium" selected style="background: var(--bg-base); color: var(--text-main);">Medium (640x480 @ 15fps)</option>
+                        <option value="high" style="background: var(--bg-base); color: var(--text-main);">High (1280x720 @ 30fps)</option>
+                    </select>
+                </div>
+            </section>
 
-            
-            
+        </aside>
 
         <!-- Right Side Core Viewports -->
         <article class="main-workspace">
@@ -1092,26 +1073,8 @@
                 </div>
             </div>
 
-    <!-- Snapshot Modal Viewport -->
-    <div id="snapshotModal" class="dialog-overlay">
-        <div class="glass-panel dialog-box" style="max-width: 500px; width: 90%;">
-            <h3 class="dialog-title">Camera Snapshot</h3>
-            <div style="width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05); margin: 15px 0; background: #000; display: flex; align-items: center; justify-content: center; min-height: 250px;">
-                <img id="snapshotPreview" src="" alt="Snapshot frame" style="max-width: 100%; max-height: 380px; display: block; border-radius: 8px;">
-            </div>
-            <div class="dialog-actions">
-                <button id="btnDownloadSnapshot" class="btn-explorer btn-primary" style="margin-right: 8px;">Save Photo</button>
-                <button id="btnCloseSnapshot" class="btn-explorer">Close</button>
-            </div>
-        </div>
-    </div>
-
-            <!-- Map and Debug Terminals -->
+            <!-- Debug Console Terminal -->
             <div class="bottom-grid">
-                
-                
-
-                <!-- Debug Console Terminal -->
                 <div class="glass-panel terminal-card">
                     <div class="terminal-header">
                         <div class="terminal-header-title">
@@ -1132,6 +1095,34 @@
         </article>
     </main>
 
+    <!-- Snapshot Modal Viewport -->
+    <div id="snapshotModal" class="dialog-overlay">
+        <div class="glass-panel dialog-box" style="max-width: 500px; width: 90%;">
+            <h3 class="dialog-title">Camera Snapshot</h3>
+            <div style="width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05); margin: 15px 0; background: #000; display: flex; align-items: center; justify-content: center; min-height: 250px;">
+                <img id="snapshotPreview" src="" alt="Snapshot frame" style="max-width: 100%; max-height: 380px; display: block; border-radius: 8px;">
+            </div>
+            <div class="dialog-actions">
+                <button id="btnDownloadSnapshot" class="btn-explorer btn-primary" style="margin-right: 8px;">Save Photo</button>
+                <button id="btnCloseSnapshot" class="btn-explorer">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- P2P File Preview Modal Viewport -->
+    <div id="previewModal" class="dialog-overlay">
+        <div class="glass-panel dialog-box" style="max-width: 90vw; width: 90vw; max-height: 92vh; padding: 20px; display: flex; flex-direction: column;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-shrink: 0;">
+                <h3 id="previewTitle" class="dialog-title" style="margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%;">Preview</h3>
+                <button id="previewCloseBtn" class="btn-explorer" style="padding: 6px 14px;">✕ Close</button>
+            </div>
+            <div id="previewProgress" style="text-align: center; color: var(--primary); font-family: var(--font-mono); font-size: 0.85rem; margin-bottom: 12px; flex-shrink: 0;">Loading...</div>
+            <div id="previewContent" style="display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 200px; flex: 1; overflow: auto;">
+                <!-- Dynamic content will be inserted here -->
+            </div>
+        </div>
+    </div>
+
     <!-- Generic Dialog Popups (Custom Overlay) -->
     <div id="dialogOverlay" class="dialog-overlay">
         <div class="glass-panel dialog-box">
@@ -1145,7 +1136,6 @@
         </div>
     </div>
 
-    
     <script src="client.js"></script>
 </body>
 </html>
