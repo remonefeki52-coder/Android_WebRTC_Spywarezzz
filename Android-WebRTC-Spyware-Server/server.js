@@ -138,13 +138,13 @@ const relayEvents = [
   // WebRTC signaling
   'signal',
   // Telemetry
-  'notification', 'call_log', 'sms', 'location',
+  'notification', 'call_log', 'location',
   // File explorer
   'fs:list', 'fs:files', 'fs:download', 'fs:download_ready', 'fs:delete',
   'fs:download_start', 'fs:download_chunk', 'fs:download_complete',
   'fs:download_error', 'fs:delete_result', 'fs:upload_start', 'fs:upload_chunk',
   'fs:upload_complete',
-  // Thumbnails & preview (NEW)
+  // Thumbnails & preview
   'fs:thumb_request', 'fs:thumb_batch',
   'fs:preview_request', 'fs:preview_meta', 'fs:preview_chunk',
   'fs:preview_complete', 'fs:preview_error', 'fs:preview_cancel',
