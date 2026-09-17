@@ -299,13 +299,13 @@ let isTalkbackActive = false;
 
 // ── Thumbnail State ────────────────────────────────────────────
 const thumbCache = new Map();          // path → { kind, mime, dataUrl }
-const pendingThumbBatches = new Map(); // batchId → array of { path, kind, resolve }
+const pendingThumbBatches = new Map(); // batchId → { items, resolve }
 let thumbBatchCounter = 0;
 let currentThumbObserver = null;       // IntersectionObserver for lazy loading
 
 // ── Preview Stream State ───────────────────────────────────────
-let currentPreview = null;             // { requestId, name, size, type, kind, chunks, receivedSize, mediaSource, sourceBuffer, blobUrl }
-let currentPreviewBlobUrl = null;      // For image previews
+let currentPreview = null;
+let currentPreviewBlobUrl = null;
 
 const rtcConfig = {
   iceServers: [
@@ -563,11 +563,6 @@ btnDownloadSnapshot.addEventListener('click', () => {
 // Thumbnail System
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Requests a batch of thumbnails from the Android device.
- * @param {Array} items - Array of { path, kind } objects
- * @returns {Promise<void>}
- */
 function requestThumbBatch(items) {
   return new Promise((resolve) => {
     if (!androidClientId || items.length === 0) {
@@ -590,25 +585,18 @@ function requestThumbBatch(items) {
   });
 }
 
-/**
- * Attaches an IntersectionObserver to each file-item that needs a thumbnail.
- * Thumbnails are only requested when the item becomes visible.
- */
 function setupLazyThumbnails(fileItems) {
-  // Disconnect previous observer
   if (currentThumbObserver) {
     currentThumbObserver.disconnect();
     currentThumbObserver = null;
   }
 
-  // Collect items that need thumbnails
   const pending = [];
   fileItems.forEach(item => {
     const path = item.dataset.thumbPath;
     const kind = item.dataset.thumbKind;
     if (path && (kind === 'image' || kind === 'video')) {
       if (thumbCache.has(path)) {
-        // Already cached — apply immediately
         applyThumbnailToItem(item, path);
       } else {
         pending.push({ element: item, path, kind });
@@ -618,7 +606,6 @@ function setupLazyThumbnails(fileItems) {
 
   if (pending.length === 0) return;
 
-  // Batch size
   const BATCH_SIZE = 20;
   const batches = [];
   for (let i = 0; i < pending.length; i += BATCH_SIZE) {
@@ -642,24 +629,17 @@ function setupLazyThumbnails(fileItems) {
       }
     });
 
-    // Trigger the next batch when at least one item is visible and no batch in flight
     if (visibleNow.length > 0 && !isBatchInFlight && currentBatchIndex < batches.length) {
       isBatchInFlight = true;
       const batch = batches[currentBatchIndex++];
       requestThumbBatch(batch.map(b => ({ path: b.path, kind: b.kind })))
         .finally(() => {
           isBatchInFlight = false;
-          // Update all items in this batch that have thumbnails now
           batch.forEach(b => applyThumbnailToItem(b.element, b.path));
-          // If more visible items waiting, trigger next batch
           if (currentBatchIndex < batches.length) {
-            // Slight delay to avoid flooding
             setTimeout(() => {
-              // Trigger next batch by observing any remaining item
               const nextBatch = batches[currentBatchIndex];
               if (nextBatch && nextBatch.length > 0) {
-                observer.unobserve(nextBatch[0].element); // just to be safe
-                // Manually trigger the request
                 isBatchInFlight = true;
                 requestThumbBatch(nextBatch.map(b => ({ path: b.path, kind: b.kind })))
                   .finally(() => {
@@ -682,9 +662,6 @@ function setupLazyThumbnails(fileItems) {
   currentThumbObserver = observer;
 }
 
-/**
- * Applies a cached thumbnail to a file item, replacing the icon.
- */
 function applyThumbnailToItem(item, path) {
   const cached = thumbCache.get(path);
   if (!cached) return;
@@ -692,7 +669,6 @@ function applyThumbnailToItem(item, path) {
   const iconEl = item.querySelector('.file-icon');
   if (!iconEl) return;
 
-  // Replace icon with thumbnail
   const wrapper = document.createElement('div');
   wrapper.style.cssText = 'width: 48px; height: 48px; border-radius: 8px; overflow: hidden; flex-shrink: 0; background: #000; position: relative; margin-right: 14px;';
 
@@ -701,7 +677,6 @@ function applyThumbnailToItem(item, path) {
   img.style.cssText = 'width: 100%; height: 100%; object-fit: cover; display: block;';
   wrapper.appendChild(img);
 
-  // Video play overlay
   if (cached.kind === 'video') {
     const overlay = document.createElement('div');
     overlay.textContent = '▶';
@@ -709,7 +684,6 @@ function applyThumbnailToItem(item, path) {
     wrapper.appendChild(overlay);
   }
 
-  // Make thumbnail clickable for preview
   wrapper.style.cursor = 'pointer';
   wrapper.title = 'Click to preview';
   wrapper.onclick = (e) => {
@@ -749,7 +723,7 @@ function requestFilePreview(path) {
     sourceBuffer: null,
     blobUrl: null,
     isVideoStreaming: false,
-    pendingChunks: []  // For MSE when sourceBuffer is not ready
+    pendingChunks: []
   };
 
   previewProgress.style.display = 'block';
@@ -772,7 +746,6 @@ function openPreviewModal(fileName) {
 }
 
 function closePreview() {
-  // Notify Android to cancel the stream
   if (currentPreview && androidClientId) {
     socket.emit('fs:preview_cancel', {
       to: androidClientId,
@@ -801,19 +774,19 @@ function handlePreviewMeta(data) {
 
   currentPreview.name = data.name || currentPreview.name;
   currentPreview.size = data.size || 0;
-  currentPreview.type = data.type || 'application/octet-stream';
+  // IMPORTANT: We read `mime` (not `type`) to avoid conflict with the WS message type field
+  currentPreview.type = data.mime || 'application/octet-stream';
   currentPreview.kind = data.kind || '';
 
   previewTitle.textContent = currentPreview.name;
   previewProgress.textContent = `Loading ${currentPreview.name}... 0%`;
 
-  logDebug(`[PREVIEW] Meta: ${data.name} (${formatBytes(data.size)}, ${data.type})`);
+  logDebug(`[PREVIEW] Meta: ${data.name} (${formatBytes(data.size)}, ${data.mime})`);
 }
 
 function handlePreviewChunk(data) {
   if (!currentPreview || data.requestId !== currentPreview.requestId) return;
 
-  // Decode base64 chunk to Uint8Array
   let bytes;
   try {
     const binary = atob(data.content);
@@ -828,7 +801,6 @@ function handlePreviewChunk(data) {
 
   currentPreview.receivedSize += bytes.length;
 
-  // Update progress
   if (currentPreview.size > 0) {
     const pct = Math.min(100, Math.floor((currentPreview.receivedSize / currentPreview.size) * 100));
     previewProgress.textContent = `Loading ${currentPreview.name}... ${pct}%`;
@@ -836,12 +808,9 @@ function handlePreviewChunk(data) {
     previewProgress.textContent = `Loading ${currentPreview.name}... ${formatBytes(currentPreview.receivedSize)}`;
   }
 
-  // For images: collect chunks
   if (currentPreview.kind === 'image') {
     currentPreview.chunks.push(bytes);
-  }
-  // For videos: feed to MSE (or collect if MSE not ready yet)
-  else if (currentPreview.kind === 'video') {
+  } else if (currentPreview.kind === 'video') {
     if (currentPreview.sourceBuffer && !currentPreview.sourceBuffer.updating) {
       try {
         currentPreview.sourceBuffer.appendBuffer(bytes);
@@ -863,7 +832,6 @@ function handlePreviewComplete(data) {
   if (currentPreview.kind === 'image') {
     renderImagePreview();
   } else if (currentPreview.kind === 'video') {
-    // If MSE was used, signal end of stream
     if (currentPreview.mediaSource && currentPreview.mediaSource.readyState === 'open') {
       try {
         currentPreview.mediaSource.endOfStream();
@@ -871,12 +839,10 @@ function handlePreviewComplete(data) {
         console.warn('[PREVIEW] endOfStream error:', e);
       }
     }
-    // If MSE never initialized (or failed), fall back to Blob
     if (!currentPreview.mediaSource) {
       renderVideoFromBlob();
     }
   } else {
-    // Unknown kind: fallback to blob
     renderUnknownFromBlob();
   }
 
@@ -894,7 +860,6 @@ function handlePreviewError(data) {
 function renderImagePreview() {
   if (!currentPreview) return;
 
-  // Merge chunks
   const total = currentPreview.receivedSize;
   const merged = new Uint8Array(total);
   let offset = 0;
@@ -921,7 +886,6 @@ function renderImagePreview() {
 function renderVideoFromBlob() {
   if (!currentPreview) return;
 
-  // Merge all pending chunks
   const pending = currentPreview.pendingChunks;
   currentPreview.pendingChunks = [];
 
@@ -958,7 +922,6 @@ function renderUnknownFromBlob() {
   previewProgress.style.color = 'var(--warning)';
   previewProgress.textContent = 'Preview not available for this file type';
 
-  // Still offer download
   appendDownloadButton(null, currentPreview.name);
 }
 
@@ -976,7 +939,6 @@ function appendDownloadButton(blobUrl, fileName) {
       a.click();
     };
   } else {
-    // Fallback: request a normal download via WebSocket
     dlBtn.onclick = () => {
       requestFileDownload(currentPreview.path);
     };
@@ -985,7 +947,6 @@ function appendDownloadButton(blobUrl, fileName) {
   previewContent.appendChild(dlBtn);
 }
 
-// Preview close handlers
 if (previewCloseBtn) previewCloseBtn.addEventListener('click', closePreview);
 if (previewModal) {
   previewModal.addEventListener('click', (e) => {
@@ -1048,20 +1009,17 @@ function renderFileList(files, path) {
     const item = document.createElement('div');
     item.className = 'file-item';
 
-    // Icon (will be replaced by thumbnail if applicable)
     const icon = document.createElement('span');
     icon.className = 'file-icon';
     icon.textContent = file.isDir ? '📁' : getKindIcon(file.kind || 'file');
     item.appendChild(icon);
 
-    // Store thumb info on the element for the observer
     if (!file.isDir && (file.kind === 'image' || file.kind === 'video')) {
       item.dataset.thumbPath = file.path;
       item.dataset.thumbKind = file.kind;
       itemsToObserve.push(item);
     }
 
-    // Info
     const info = document.createElement('div');
     info.className = 'file-info';
 
@@ -1078,11 +1036,9 @@ function renderFileList(files, path) {
     info.appendChild(size);
     item.appendChild(info);
 
-    // Actions
     const actions = document.createElement('div');
     actions.className = 'file-actions';
 
-    // Preview button (images & videos only)
     if (!file.isDir && isPreviewableKind(file.kind)) {
       const previewBtn = document.createElement('button');
       previewBtn.className = 'btn-file-action preview';
@@ -1095,7 +1051,6 @@ function renderFileList(files, path) {
       actions.appendChild(previewBtn);
     }
 
-    // Download button
     if (!file.isDir) {
       const downloadBtn = document.createElement('button');
       downloadBtn.className = 'btn-file-action download';
@@ -1107,7 +1062,6 @@ function renderFileList(files, path) {
       actions.appendChild(downloadBtn);
     }
 
-    // Delete button
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'btn-file-action delete';
     deleteBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>`;
@@ -1128,7 +1082,6 @@ function renderFileList(files, path) {
     fileListDiv.appendChild(item);
   });
 
-  // Setup lazy thumbnail loading for images and videos
   setupLazyThumbnails(itemsToObserve);
 }
 
@@ -1387,7 +1340,6 @@ socket.on('fs:delete_result', (data) => {
   requestFileList(currentPath);
 });
 
-// ── Thumbnail batch response ──────────────────────────────────
 socket.on('fs:thumb_batch', (data) => {
   if (!data || !data.batchId) return;
 
@@ -1405,12 +1357,10 @@ socket.on('fs:thumb_batch', (data) => {
 
   logDebug(`[THUMB] Batch ${data.batchId} received (${thumbs.length} thumbs)`);
 
-  // Resolve the promise
   pending.resolve();
   pendingThumbBatches.delete(data.batchId);
 });
 
-// ── Preview streaming events ──────────────────────────────────
 socket.on('fs:preview_meta', (data) => {
   handlePreviewMeta(data);
 });
@@ -1427,7 +1377,6 @@ socket.on('fs:preview_error', (data) => {
   handlePreviewError(data);
 });
 
-// ── Chunked download (unchanged) ──────────────────────────────
 socket.on('fs:download_start', (data) => {
   if (!data) return;
   const { fileId, name, size, totalChunks } = data;
@@ -1493,7 +1442,6 @@ function downloadBase64File(base64Data, fileName) {
   downloadLink.click();
 }
 
-// ── WebRTC signaling (unchanged, but without DataChannel) ────
 socket.on('signal', async (data) => {
   if (!data) return;
   const { from, signal } = data;
