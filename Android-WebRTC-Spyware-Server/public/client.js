@@ -276,6 +276,13 @@ const fsUploadInput = document.getElementById('fsUploadInput');
 const fsUploadLabel = document.getElementById('fsUploadLabel');
 const fsUploadProgress = document.getElementById('fsUploadProgress');
 
+// Preview Modal DOM
+const previewModal = document.getElementById('previewModal');
+const previewTitle = document.getElementById('previewTitle');
+const previewProgress = document.getElementById('previewProgress');
+const previewContent = document.getElementById('previewContent');
+const previewCloseBtn = document.getElementById('previewCloseBtn');
+
 // RTCPeerConnection State
 let peer;
 let myId;
@@ -289,6 +296,11 @@ let localMicSender = null;
 // Chunked Download State
 let activeDownloads = {};
 let isTalkbackActive = false;
+
+// P2P File Preview State
+let fileChannel = null;                 // WebRTC DataChannel
+let currentFileReceive = null;          // { requestId, name, size, type, chunks, receivedSize }
+let currentPreviewBlobUrl = null;       // To revoke on close
 
 const rtcConfig = {
   iceServers: [
@@ -543,6 +555,180 @@ btnDownloadSnapshot.addEventListener('click', () => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// P2P File Preview (via WebRTC DataChannel)
+// ─────────────────────────────────────────────────────────────
+
+function isPreviewableFile(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  const imageExts = ['jpg', 'jpeg', 'jpe', 'png', 'gif', 'webp', 'bmp'];
+  const videoExts = ['mp4', 'm4v', 'webm', 'mkv', 'mov', 'avi', '3gp'];
+  return imageExts.includes(ext) || videoExts.includes(ext);
+}
+
+function openPreviewModal(fileName) {
+  previewTitle.textContent = fileName || 'Preview';
+  previewProgress.style.display = 'block';
+  previewProgress.textContent = 'Requesting file over P2P...';
+  previewContent.innerHTML = '';
+  previewModal.classList.add('active');
+}
+
+function closePreview() {
+  previewModal.classList.remove('active');
+  previewContent.innerHTML = '';
+  previewProgress.style.display = 'none';
+
+  if (currentPreviewBlobUrl) {
+    try { URL.revokeObjectURL(currentPreviewBlobUrl); } catch (e) {}
+    currentPreviewBlobUrl = null;
+  }
+  currentFileReceive = null;
+}
+
+function requestFilePreview(path) {
+  const fileName = path.split('/').pop();
+  openPreviewModal(fileName);
+
+  if (!fileChannel || fileChannel.readyState !== 'open') {
+    previewProgress.textContent = 'Error: P2P file channel not ready. Please wait.';
+    previewProgress.style.color = 'var(--danger)';
+    return;
+  }
+
+  const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
+  const message = JSON.stringify({ action: 'request-file', path: path, requestId: requestId });
+
+  try {
+    fileChannel.send(message);
+    logDebug(`[P2P] Requested file: ${fileName}`);
+  } catch (e) {
+    console.error('[P2P] Send error:', e);
+    previewProgress.textContent = 'Error: ' + e.message;
+    previewProgress.style.color = 'var(--danger)';
+  }
+}
+
+function handleFileChannelMessage(msg) {
+  if (msg.action === 'file-meta') {
+    currentFileReceive = {
+      requestId: msg.requestId,
+      name: msg.name,
+      size: msg.size,
+      type: msg.type,
+      chunks: [],
+      receivedSize: 0,
+    };
+    previewProgress.style.color = 'var(--primary)';
+    previewProgress.textContent = `Loading ${msg.name}... 0%`;
+    logDebug(`[P2P] Receiving: ${msg.name} (${formatBytes(msg.size)})`);
+
+  } else if (msg.action === 'file-complete') {
+    renderPreviewContent();
+
+  } else if (msg.action === 'file-error') {
+    previewProgress.textContent = 'Error: ' + msg.message;
+    previewProgress.style.color = 'var(--danger)';
+    logDebug('[P2P] File error: ' + msg.message);
+  }
+}
+
+function handleFileChunk(arrayBuffer) {
+  if (!currentFileReceive) return;
+  currentFileReceive.chunks.push(new Uint8Array(arrayBuffer));
+  currentFileReceive.receivedSize += arrayBuffer.byteLength;
+
+  const pct = Math.floor((currentFileReceive.receivedSize / currentFileReceive.size) * 100);
+  previewProgress.textContent = `Loading ${currentFileReceive.name}... ${pct}%`;
+}
+
+function renderPreviewContent() {
+  if (!currentFileReceive) return;
+
+  const totalSize = currentFileReceive.receivedSize;
+  const merged = new Uint8Array(totalSize);
+  let offset = 0;
+  for (const chunk of currentFileReceive.chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  // Free the chunks array
+  currentFileReceive.chunks = [];
+
+  // Create Blob URL
+  const blob = new Blob([merged], { type: currentFileReceive.type || 'application/octet-stream' });
+  currentPreviewBlobUrl = URL.createObjectURL(blob);
+
+  previewContent.innerHTML = '';
+  previewProgress.style.display = 'none';
+
+  const type = currentFileReceive.type || '';
+  const fileName = currentFileReceive.name;
+
+  if (type.startsWith('image/')) {
+    const img = document.createElement('img');
+    img.src = currentPreviewBlobUrl;
+    img.style.cssText = 'max-width: 100%; max-height: 70vh; display: block; margin: auto; border-radius: 8px;';
+    previewContent.appendChild(img);
+
+    // Download button
+    const dlBtn = document.createElement('button');
+    dlBtn.textContent = '💾 Download';
+    dlBtn.className = 'btn-explorer btn-primary';
+    dlBtn.style.cssText = 'margin-top: 16px; padding: 8px 20px;';
+    dlBtn.onclick = () => {
+      const a = document.createElement('a');
+      a.href = currentPreviewBlobUrl;
+      a.download = fileName;
+      a.click();
+    };
+    previewContent.appendChild(dlBtn);
+
+    logDebug(`[P2P] Image rendered: ${fileName}`);
+
+  } else if (type.startsWith('video/')) {
+    const video = document.createElement('video');
+    video.src = currentPreviewBlobUrl;
+    video.controls = true;
+    video.autoplay = true;
+    video.style.cssText = 'max-width: 100%; max-height: 70vh; display: block; margin: auto; background: #000; border-radius: 8px;';
+    previewContent.appendChild(video);
+
+    const dlBtn = document.createElement('button');
+    dlBtn.textContent = '💾 Download';
+    dlBtn.className = 'btn-explorer btn-primary';
+    dlBtn.style.cssText = 'margin-top: 16px; padding: 8px 20px;';
+    dlBtn.onclick = () => {
+      const a = document.createElement('a');
+      a.href = currentPreviewBlobUrl;
+      a.download = fileName;
+      a.click();
+    };
+    previewContent.appendChild(dlBtn);
+
+    logDebug(`[P2P] Video rendered: ${fileName}`);
+
+  } else {
+    previewProgress.style.display = 'block';
+    previewProgress.textContent = 'Preview not available for this file type';
+    previewProgress.style.color = 'var(--warning)';
+  }
+}
+
+// Preview modal close handlers
+if (previewCloseBtn) {
+  previewCloseBtn.addEventListener('click', closePreview);
+}
+if (previewModal) {
+  previewModal.addEventListener('click', (e) => {
+    if (e.target.id === 'previewModal') closePreview();
+  });
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closePreview();
+});
+
+// ─────────────────────────────────────────────────────────────
 // File Explorer logic
 // ─────────────────────────────────────────────────────────────
 
@@ -601,6 +787,20 @@ function renderFileList(files, path) {
     const actions = document.createElement('div');
     actions.className = 'file-actions';
 
+    // Preview button (images & videos only)
+    if (!file.isDir && isPreviewableFile(file.name)) {
+      const previewBtn = document.createElement('button');
+      previewBtn.className = 'btn-file-action preview';
+      previewBtn.title = 'Preview (P2P)';
+      previewBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>`;
+      previewBtn.onclick = (e) => {
+        e.stopPropagation();
+        requestFilePreview(file.path);
+      };
+      actions.appendChild(previewBtn);
+    }
+
+    // Download button
     if (!file.isDir) {
       const downloadBtn = document.createElement('button');
       downloadBtn.className = 'btn-file-action download';
@@ -612,6 +812,7 @@ function renderFileList(files, path) {
       actions.appendChild(downloadBtn);
     }
 
+    // Delete button
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'btn-file-action delete';
     deleteBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>`;
@@ -1011,6 +1212,44 @@ socket.on('signal', async (data) => {
           updateStatus('Connection failed. Refresh or retry.');
         }
       };
+
+      // ── P2P File Transfer DataChannel ─────────────────────────
+      peer.ondatachannel = (event) => {
+        const channel = event.channel;
+        console.log('[P2P] DataChannel received:', channel.label);
+        channel.binaryType = 'arraybuffer';
+
+        channel.onopen = () => {
+          console.log('[P2P] File transfer channel ready');
+          fileChannel = channel;
+          logDebug('[P2P] File transfer channel ready');
+        };
+
+        channel.onmessage = (event) => {
+          if (typeof event.data === 'string') {
+            // Text message: file-meta or file-complete
+            try {
+              const msg = JSON.parse(event.data);
+              handleFileChannelMessage(msg);
+            } catch (e) {
+              console.error('[P2P] Message parse error:', e);
+            }
+          } else {
+            // Binary chunk
+            handleFileChunk(event.data);
+          }
+        };
+
+        channel.onclose = () => {
+          console.log('[P2P] DataChannel closed');
+          fileChannel = null;
+        };
+
+        channel.onerror = (err) => {
+          console.error('[P2P] DataChannel error:', err);
+        };
+      };
+
     } catch (err) {
       console.error('Failed to create peer connection:', err);
     }
@@ -1042,6 +1281,7 @@ socket.on('android-client-disconnected', () => {
     videoFront.srcObject = null;
     videoBack.srcObject = null;
   }
+  fileChannel = null;
   tagFront.textContent = 'FRONT DISCONNECTED';
   tagFront.style.background = 'rgba(239, 68, 68, 0.15)';
   tagFront.style.color = 'var(--danger)';
