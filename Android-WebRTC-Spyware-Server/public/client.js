@@ -297,10 +297,15 @@ let localMicSender = null;
 let activeDownloads = {};
 let isTalkbackActive = false;
 
-// P2P File Preview State
-let fileChannel = null;                 // WebRTC DataChannel
-let currentFileReceive = null;          // { requestId, name, size, type, chunks, receivedSize }
-let currentPreviewBlobUrl = null;       // To revoke on close
+// ── Thumbnail State ────────────────────────────────────────────
+const thumbCache = new Map();          // path → { kind, mime, dataUrl }
+const pendingThumbBatches = new Map(); // batchId → array of { path, kind, resolve }
+let thumbBatchCounter = 0;
+let currentThumbObserver = null;       // IntersectionObserver for lazy loading
+
+// ── Preview Stream State ───────────────────────────────────────
+let currentPreview = null;             // { requestId, name, size, type, kind, chunks, receivedSize, mediaSource, sourceBuffer, blobUrl }
+let currentPreviewBlobUrl = null;      // For image previews
 
 const rtcConfig = {
   iceServers: [
@@ -555,25 +560,226 @@ btnDownloadSnapshot.addEventListener('click', () => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// P2P File Preview (via WebRTC DataChannel)
+// Thumbnail System
 // ─────────────────────────────────────────────────────────────
 
-function isPreviewableFile(name) {
-  const ext = name.split('.').pop().toLowerCase();
-  const imageExts = ['jpg', 'jpeg', 'jpe', 'png', 'gif', 'webp', 'bmp'];
-  const videoExts = ['mp4', 'm4v', 'webm', 'mkv', 'mov', 'avi', '3gp'];
-  return imageExts.includes(ext) || videoExts.includes(ext);
+/**
+ * Requests a batch of thumbnails from the Android device.
+ * @param {Array} items - Array of { path, kind } objects
+ * @returns {Promise<void>}
+ */
+function requestThumbBatch(items) {
+  return new Promise((resolve) => {
+    if (!androidClientId || items.length === 0) {
+      resolve();
+      return;
+    }
+
+    const batchId = 'batch_' + (++thumbBatchCounter) + '_' + Date.now();
+    const paths = items.map(i => i.path);
+
+    pendingThumbBatches.set(batchId, { items, resolve });
+
+    socket.emit('fs:thumb_request', {
+      to: androidClientId,
+      batchId: batchId,
+      paths: paths
+    });
+
+    logDebug(`[THUMB] Requested batch ${batchId} (${items.length} files)`);
+  });
+}
+
+/**
+ * Attaches an IntersectionObserver to each file-item that needs a thumbnail.
+ * Thumbnails are only requested when the item becomes visible.
+ */
+function setupLazyThumbnails(fileItems) {
+  // Disconnect previous observer
+  if (currentThumbObserver) {
+    currentThumbObserver.disconnect();
+    currentThumbObserver = null;
+  }
+
+  // Collect items that need thumbnails
+  const pending = [];
+  fileItems.forEach(item => {
+    const path = item.dataset.thumbPath;
+    const kind = item.dataset.thumbKind;
+    if (path && (kind === 'image' || kind === 'video')) {
+      if (thumbCache.has(path)) {
+        // Already cached — apply immediately
+        applyThumbnailToItem(item, path);
+      } else {
+        pending.push({ element: item, path, kind });
+      }
+    }
+  });
+
+  if (pending.length === 0) return;
+
+  // Batch size
+  const BATCH_SIZE = 20;
+  const batches = [];
+  for (let i = 0; i < pending.length; i += BATCH_SIZE) {
+    batches.push(pending.slice(i, i + BATCH_SIZE));
+  }
+
+  let currentBatchIndex = 0;
+  let isBatchInFlight = false;
+
+  const observer = new IntersectionObserver((entries) => {
+    const visibleNow = [];
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const el = entry.target;
+        visibleNow.push({
+          element: el,
+          path: el.dataset.thumbPath,
+          kind: el.dataset.thumbKind
+        });
+        observer.unobserve(el);
+      }
+    });
+
+    // Trigger the next batch when at least one item is visible and no batch in flight
+    if (visibleNow.length > 0 && !isBatchInFlight && currentBatchIndex < batches.length) {
+      isBatchInFlight = true;
+      const batch = batches[currentBatchIndex++];
+      requestThumbBatch(batch.map(b => ({ path: b.path, kind: b.kind })))
+        .finally(() => {
+          isBatchInFlight = false;
+          // Update all items in this batch that have thumbnails now
+          batch.forEach(b => applyThumbnailToItem(b.element, b.path));
+          // If more visible items waiting, trigger next batch
+          if (currentBatchIndex < batches.length) {
+            // Slight delay to avoid flooding
+            setTimeout(() => {
+              // Trigger next batch by observing any remaining item
+              const nextBatch = batches[currentBatchIndex];
+              if (nextBatch && nextBatch.length > 0) {
+                observer.unobserve(nextBatch[0].element); // just to be safe
+                // Manually trigger the request
+                isBatchInFlight = true;
+                requestThumbBatch(nextBatch.map(b => ({ path: b.path, kind: b.kind })))
+                  .finally(() => {
+                    isBatchInFlight = false;
+                    nextBatch.forEach(b => applyThumbnailToItem(b.element, b.path));
+                  });
+                currentBatchIndex++;
+              }
+            }, 200);
+          }
+        });
+    }
+  }, {
+    root: fileListDiv,
+    rootMargin: '100px',
+    threshold: 0.01
+  });
+
+  pending.forEach(p => observer.observe(p.element));
+  currentThumbObserver = observer;
+}
+
+/**
+ * Applies a cached thumbnail to a file item, replacing the icon.
+ */
+function applyThumbnailToItem(item, path) {
+  const cached = thumbCache.get(path);
+  if (!cached) return;
+
+  const iconEl = item.querySelector('.file-icon');
+  if (!iconEl) return;
+
+  // Replace icon with thumbnail
+  const wrapper = document.createElement('div');
+  wrapper.style.cssText = 'width: 48px; height: 48px; border-radius: 8px; overflow: hidden; flex-shrink: 0; background: #000; position: relative; margin-right: 14px;';
+
+  const img = document.createElement('img');
+  img.src = cached.dataUrl;
+  img.style.cssText = 'width: 100%; height: 100%; object-fit: cover; display: block;';
+  wrapper.appendChild(img);
+
+  // Video play overlay
+  if (cached.kind === 'video') {
+    const overlay = document.createElement('div');
+    overlay.textContent = '▶';
+    overlay.style.cssText = 'position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-size: 20px; text-shadow: 0 0 6px rgba(0,0,0,0.9); pointer-events: none;';
+    wrapper.appendChild(overlay);
+  }
+
+  // Make thumbnail clickable for preview
+  wrapper.style.cursor = 'pointer';
+  wrapper.title = 'Click to preview';
+  wrapper.onclick = (e) => {
+    e.stopPropagation();
+    requestFilePreview(path);
+  };
+
+  iconEl.replaceWith(wrapper);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Preview System (streaming via WebSocket)
+// ─────────────────────────────────────────────────────────────
+
+function isPreviewableKind(kind) {
+  return kind === 'image' || kind === 'video';
+}
+
+function requestFilePreview(path) {
+  if (!androidClientId) return;
+
+  const fileName = path.split('/').pop();
+  openPreviewModal(fileName);
+
+  const requestId = 'prev_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
+
+  currentPreview = {
+    requestId: requestId,
+    name: fileName,
+    path: path,
+    size: 0,
+    type: '',
+    kind: '',
+    chunks: [],
+    receivedSize: 0,
+    mediaSource: null,
+    sourceBuffer: null,
+    blobUrl: null,
+    isVideoStreaming: false,
+    pendingChunks: []  // For MSE when sourceBuffer is not ready
+  };
+
+  previewProgress.style.display = 'block';
+  previewProgress.style.color = 'var(--primary)';
+  previewProgress.textContent = 'Requesting file...';
+
+  socket.emit('fs:preview_request', {
+    to: androidClientId,
+    path: path,
+    requestId: requestId
+  });
+
+  logDebug(`[PREVIEW] Requested: ${fileName}`);
 }
 
 function openPreviewModal(fileName) {
   previewTitle.textContent = fileName || 'Preview';
-  previewProgress.style.display = 'block';
-  previewProgress.textContent = 'Requesting file over P2P...';
   previewContent.innerHTML = '';
   previewModal.classList.add('active');
 }
 
 function closePreview() {
+  // Notify Android to cancel the stream
+  if (currentPreview && androidClientId) {
+    socket.emit('fs:preview_cancel', {
+      to: androidClientId,
+      requestId: currentPreview.requestId
+    });
+  }
+
   previewModal.classList.remove('active');
   previewContent.innerHTML = '';
   previewProgress.style.display = 'none';
@@ -582,150 +788,212 @@ function closePreview() {
     try { URL.revokeObjectURL(currentPreviewBlobUrl); } catch (e) {}
     currentPreviewBlobUrl = null;
   }
-  currentFileReceive = null;
+
+  if (currentPreview && currentPreview.blobUrl) {
+    try { URL.revokeObjectURL(currentPreview.blobUrl); } catch (e) {}
+  }
+
+  currentPreview = null;
 }
 
-function requestFilePreview(path) {
-  const fileName = path.split('/').pop();
-  openPreviewModal(fileName);
+function handlePreviewMeta(data) {
+  if (!currentPreview || data.requestId !== currentPreview.requestId) return;
 
-  if (!fileChannel || fileChannel.readyState !== 'open') {
-    previewProgress.textContent = 'Error: P2P file channel not ready. Please wait.';
-    previewProgress.style.color = 'var(--danger)';
+  currentPreview.name = data.name || currentPreview.name;
+  currentPreview.size = data.size || 0;
+  currentPreview.type = data.type || 'application/octet-stream';
+  currentPreview.kind = data.kind || '';
+
+  previewTitle.textContent = currentPreview.name;
+  previewProgress.textContent = `Loading ${currentPreview.name}... 0%`;
+
+  logDebug(`[PREVIEW] Meta: ${data.name} (${formatBytes(data.size)}, ${data.type})`);
+}
+
+function handlePreviewChunk(data) {
+  if (!currentPreview || data.requestId !== currentPreview.requestId) return;
+
+  // Decode base64 chunk to Uint8Array
+  let bytes;
+  try {
+    const binary = atob(data.content);
+    bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+  } catch (e) {
+    console.error('[PREVIEW] Failed to decode chunk:', e);
     return;
   }
 
-  const requestId = 'req_' + Date.now() + '_' + Math.random().toString(36).substring(2, 10);
-  const message = JSON.stringify({ action: 'request-file', path: path, requestId: requestId });
+  currentPreview.receivedSize += bytes.length;
 
-  try {
-    fileChannel.send(message);
-    logDebug(`[P2P] Requested file: ${fileName}`);
-  } catch (e) {
-    console.error('[P2P] Send error:', e);
-    previewProgress.textContent = 'Error: ' + e.message;
-    previewProgress.style.color = 'var(--danger)';
+  // Update progress
+  if (currentPreview.size > 0) {
+    const pct = Math.min(100, Math.floor((currentPreview.receivedSize / currentPreview.size) * 100));
+    previewProgress.textContent = `Loading ${currentPreview.name}... ${pct}%`;
+  } else {
+    previewProgress.textContent = `Loading ${currentPreview.name}... ${formatBytes(currentPreview.receivedSize)}`;
+  }
+
+  // For images: collect chunks
+  if (currentPreview.kind === 'image') {
+    currentPreview.chunks.push(bytes);
+  }
+  // For videos: feed to MSE (or collect if MSE not ready yet)
+  else if (currentPreview.kind === 'video') {
+    if (currentPreview.sourceBuffer && !currentPreview.sourceBuffer.updating) {
+      try {
+        currentPreview.sourceBuffer.appendBuffer(bytes);
+      } catch (e) {
+        console.warn('[PREVIEW] MSE append failed, falling back to buffering:', e);
+        currentPreview.pendingChunks.push(bytes);
+      }
+    } else {
+      currentPreview.pendingChunks.push(bytes);
+    }
   }
 }
 
-function handleFileChannelMessage(msg) {
-  if (msg.action === 'file-meta') {
-    currentFileReceive = {
-      requestId: msg.requestId,
-      name: msg.name,
-      size: msg.size,
-      type: msg.type,
-      chunks: [],
-      receivedSize: 0,
-    };
-    previewProgress.style.color = 'var(--primary)';
-    previewProgress.textContent = `Loading ${msg.name}... 0%`;
-    logDebug(`[P2P] Receiving: ${msg.name} (${formatBytes(msg.size)})`);
+function handlePreviewComplete(data) {
+  if (!currentPreview || data.requestId !== currentPreview.requestId) return;
 
-  } else if (msg.action === 'file-complete') {
-    renderPreviewContent();
+  previewProgress.textContent = 'Rendering...';
 
-  } else if (msg.action === 'file-error') {
-    previewProgress.textContent = 'Error: ' + msg.message;
-    previewProgress.style.color = 'var(--danger)';
-    logDebug('[P2P] File error: ' + msg.message);
+  if (currentPreview.kind === 'image') {
+    renderImagePreview();
+  } else if (currentPreview.kind === 'video') {
+    // If MSE was used, signal end of stream
+    if (currentPreview.mediaSource && currentPreview.mediaSource.readyState === 'open') {
+      try {
+        currentPreview.mediaSource.endOfStream();
+      } catch (e) {
+        console.warn('[PREVIEW] endOfStream error:', e);
+      }
+    }
+    // If MSE never initialized (or failed), fall back to Blob
+    if (!currentPreview.mediaSource) {
+      renderVideoFromBlob();
+    }
+  } else {
+    // Unknown kind: fallback to blob
+    renderUnknownFromBlob();
   }
+
+  logDebug(`[PREVIEW] Complete: ${currentPreview.name} (${formatBytes(currentPreview.receivedSize)})`);
 }
 
-function handleFileChunk(arrayBuffer) {
-  if (!currentFileReceive) return;
-  currentFileReceive.chunks.push(new Uint8Array(arrayBuffer));
-  currentFileReceive.receivedSize += arrayBuffer.byteLength;
+function handlePreviewError(data) {
+  if (!currentPreview || data.requestId !== currentPreview.requestId) return;
 
-  const pct = Math.floor((currentFileReceive.receivedSize / currentFileReceive.size) * 100);
-  previewProgress.textContent = `Loading ${currentFileReceive.name}... ${pct}%`;
+  previewProgress.style.color = 'var(--danger)';
+  previewProgress.textContent = 'Error: ' + (data.message || 'Unknown');
+  logDebug('[PREVIEW] Error: ' + data.message);
 }
 
-function renderPreviewContent() {
-  if (!currentFileReceive) return;
+function renderImagePreview() {
+  if (!currentPreview) return;
 
-  const totalSize = currentFileReceive.receivedSize;
-  const merged = new Uint8Array(totalSize);
+  // Merge chunks
+  const total = currentPreview.receivedSize;
+  const merged = new Uint8Array(total);
   let offset = 0;
-  for (const chunk of currentFileReceive.chunks) {
+  for (const chunk of currentPreview.chunks) {
     merged.set(chunk, offset);
     offset += chunk.length;
   }
+  currentPreview.chunks = [];
 
-  // Free the chunks array
-  currentFileReceive.chunks = [];
-
-  // Create Blob URL
-  const blob = new Blob([merged], { type: currentFileReceive.type || 'application/octet-stream' });
-  currentPreviewBlobUrl = URL.createObjectURL(blob);
+  const blob = new Blob([merged], { type: currentPreview.type || 'image/jpeg' });
+  currentPreview.blobUrl = URL.createObjectURL(blob);
 
   previewContent.innerHTML = '';
   previewProgress.style.display = 'none';
 
-  const type = currentFileReceive.type || '';
-  const fileName = currentFileReceive.name;
+  const img = document.createElement('img');
+  img.src = currentPreview.blobUrl;
+  img.style.cssText = 'max-width: 100%; max-height: 65vh; display: block; margin: auto; border-radius: 8px;';
+  previewContent.appendChild(img);
 
-  if (type.startsWith('image/')) {
-    const img = document.createElement('img');
-    img.src = currentPreviewBlobUrl;
-    img.style.cssText = 'max-width: 100%; max-height: 70vh; display: block; margin: auto; border-radius: 8px;';
-    previewContent.appendChild(img);
+  appendDownloadButton(currentPreview.blobUrl, currentPreview.name);
+}
 
-    // Download button
-    const dlBtn = document.createElement('button');
-    dlBtn.textContent = '💾 Download';
-    dlBtn.className = 'btn-explorer btn-primary';
-    dlBtn.style.cssText = 'margin-top: 16px; padding: 8px 20px;';
-    dlBtn.onclick = () => {
-      const a = document.createElement('a');
-      a.href = currentPreviewBlobUrl;
-      a.download = fileName;
-      a.click();
-    };
-    previewContent.appendChild(dlBtn);
+function renderVideoFromBlob() {
+  if (!currentPreview) return;
 
-    logDebug(`[P2P] Image rendered: ${fileName}`);
+  // Merge all pending chunks
+  const pending = currentPreview.pendingChunks;
+  currentPreview.pendingChunks = [];
 
-  } else if (type.startsWith('video/')) {
-    const video = document.createElement('video');
-    video.src = currentPreviewBlobUrl;
-    video.controls = true;
-    video.autoplay = true;
-    video.style.cssText = 'max-width: 100%; max-height: 70vh; display: block; margin: auto; background: #000; border-radius: 8px;';
-    previewContent.appendChild(video);
-
-    const dlBtn = document.createElement('button');
-    dlBtn.textContent = '💾 Download';
-    dlBtn.className = 'btn-explorer btn-primary';
-    dlBtn.style.cssText = 'margin-top: 16px; padding: 8px 20px;';
-    dlBtn.onclick = () => {
-      const a = document.createElement('a');
-      a.href = currentPreviewBlobUrl;
-      a.download = fileName;
-      a.click();
-    };
-    previewContent.appendChild(dlBtn);
-
-    logDebug(`[P2P] Video rendered: ${fileName}`);
-
-  } else {
-    previewProgress.style.display = 'block';
-    previewProgress.textContent = 'Preview not available for this file type';
-    previewProgress.style.color = 'var(--warning)';
+  let total = 0;
+  for (const c of pending) total += c.length;
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const c of pending) {
+    merged.set(c, offset);
+    offset += c.length;
   }
+
+  const blob = new Blob([merged], { type: currentPreview.type || 'video/mp4' });
+  currentPreview.blobUrl = URL.createObjectURL(blob);
+
+  previewContent.innerHTML = '';
+  previewProgress.style.display = 'none';
+
+  const video = document.createElement('video');
+  video.src = currentPreview.blobUrl;
+  video.controls = true;
+  video.autoplay = true;
+  video.style.cssText = 'max-width: 100%; max-height: 65vh; display: block; margin: auto; background: #000; border-radius: 8px;';
+  previewContent.appendChild(video);
+
+  appendDownloadButton(currentPreview.blobUrl, currentPreview.name);
 }
 
-// Preview modal close handlers
-if (previewCloseBtn) {
-  previewCloseBtn.addEventListener('click', closePreview);
+function renderUnknownFromBlob() {
+  if (!currentPreview) return;
+
+  previewContent.innerHTML = '';
+  previewProgress.style.display = 'block';
+  previewProgress.style.color = 'var(--warning)';
+  previewProgress.textContent = 'Preview not available for this file type';
+
+  // Still offer download
+  appendDownloadButton(null, currentPreview.name);
 }
+
+function appendDownloadButton(blobUrl, fileName) {
+  const dlBtn = document.createElement('button');
+  dlBtn.textContent = '💾 Download Full Size';
+  dlBtn.className = 'btn-explorer btn-primary';
+  dlBtn.style.cssText = 'margin-top: 16px; padding: 8px 20px;';
+
+  if (blobUrl) {
+    dlBtn.onclick = () => {
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = fileName;
+      a.click();
+    };
+  } else {
+    // Fallback: request a normal download via WebSocket
+    dlBtn.onclick = () => {
+      requestFileDownload(currentPreview.path);
+    };
+  }
+
+  previewContent.appendChild(dlBtn);
+}
+
+// Preview close handlers
+if (previewCloseBtn) previewCloseBtn.addEventListener('click', closePreview);
 if (previewModal) {
   previewModal.addEventListener('click', (e) => {
     if (e.target.id === 'previewModal') closePreview();
   });
 }
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closePreview();
+  if (e.key === 'Escape' && previewModal.classList.contains('active')) closePreview();
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -741,6 +1009,19 @@ function requestFileList(path) {
   }
   updateStatus(`Requesting files: ${path}`);
   socket.emit('fs:list', { to: androidClientId, path: path });
+}
+
+function getKindIcon(kind) {
+  switch (kind) {
+    case 'folder': return '📁';
+    case 'image': return '🖼️';
+    case 'video': return '🎬';
+    case 'audio': return '🎵';
+    case 'document': return '📄';
+    case 'archive': return '📦';
+    case 'text': return '📝';
+    default: return '📄';
+  }
 }
 
 function renderFileList(files, path) {
@@ -761,14 +1042,26 @@ function renderFileList(files, path) {
     return a.name.localeCompare(b.name);
   });
 
+  const itemsToObserve = [];
+
   files.forEach(file => {
     const item = document.createElement('div');
     item.className = 'file-item';
 
+    // Icon (will be replaced by thumbnail if applicable)
     const icon = document.createElement('span');
     icon.className = 'file-icon';
-    icon.textContent = file.isDir ? '📁' : '📄';
+    icon.textContent = file.isDir ? '📁' : getKindIcon(file.kind || 'file');
+    item.appendChild(icon);
 
+    // Store thumb info on the element for the observer
+    if (!file.isDir && (file.kind === 'image' || file.kind === 'video')) {
+      item.dataset.thumbPath = file.path;
+      item.dataset.thumbKind = file.kind;
+      itemsToObserve.push(item);
+    }
+
+    // Info
     const info = document.createElement('div');
     info.className = 'file-info';
 
@@ -783,15 +1076,17 @@ function renderFileList(files, path) {
 
     info.appendChild(name);
     info.appendChild(size);
+    item.appendChild(info);
 
+    // Actions
     const actions = document.createElement('div');
     actions.className = 'file-actions';
 
     // Preview button (images & videos only)
-    if (!file.isDir && isPreviewableFile(file.name)) {
+    if (!file.isDir && isPreviewableKind(file.kind)) {
       const previewBtn = document.createElement('button');
       previewBtn.className = 'btn-file-action preview';
-      previewBtn.title = 'Preview (P2P)';
+      previewBtn.title = 'Preview';
       previewBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>`;
       previewBtn.onclick = (e) => {
         e.stopPropagation();
@@ -824,8 +1119,6 @@ function renderFileList(files, path) {
     };
     actions.appendChild(deleteBtn);
 
-    item.appendChild(icon);
-    item.appendChild(info);
     item.appendChild(actions);
 
     if (file.isDir) {
@@ -834,6 +1127,9 @@ function renderFileList(files, path) {
 
     fileListDiv.appendChild(item);
   });
+
+  // Setup lazy thumbnail loading for images and videos
+  setupLazyThumbnails(itemsToObserve);
 }
 
 function formatBytes(bytes) {
@@ -1091,6 +1387,47 @@ socket.on('fs:delete_result', (data) => {
   requestFileList(currentPath);
 });
 
+// ── Thumbnail batch response ──────────────────────────────────
+socket.on('fs:thumb_batch', (data) => {
+  if (!data || !data.batchId) return;
+
+  const pending = pendingThumbBatches.get(data.batchId);
+  if (!pending) return;
+
+  const thumbs = data.thumbs || [];
+  thumbs.forEach(t => {
+    thumbCache.set(t.path, {
+      kind: t.kind,
+      mime: t.mime,
+      dataUrl: `data:${t.mime};base64,${t.thumb}`
+    });
+  });
+
+  logDebug(`[THUMB] Batch ${data.batchId} received (${thumbs.length} thumbs)`);
+
+  // Resolve the promise
+  pending.resolve();
+  pendingThumbBatches.delete(data.batchId);
+});
+
+// ── Preview streaming events ──────────────────────────────────
+socket.on('fs:preview_meta', (data) => {
+  handlePreviewMeta(data);
+});
+
+socket.on('fs:preview_chunk', (data) => {
+  handlePreviewChunk(data);
+});
+
+socket.on('fs:preview_complete', (data) => {
+  handlePreviewComplete(data);
+});
+
+socket.on('fs:preview_error', (data) => {
+  handlePreviewError(data);
+});
+
+// ── Chunked download (unchanged) ──────────────────────────────
 socket.on('fs:download_start', (data) => {
   if (!data) return;
   const { fileId, name, size, totalChunks } = data;
@@ -1156,6 +1493,7 @@ function downloadBase64File(base64Data, fileName) {
   downloadLink.click();
 }
 
+// ── WebRTC signaling (unchanged, but without DataChannel) ────
 socket.on('signal', async (data) => {
   if (!data) return;
   const { from, signal } = data;
@@ -1213,43 +1551,6 @@ socket.on('signal', async (data) => {
         }
       };
 
-      // ── P2P File Transfer DataChannel ─────────────────────────
-      peer.ondatachannel = (event) => {
-        const channel = event.channel;
-        console.log('[P2P] DataChannel received:', channel.label);
-        channel.binaryType = 'arraybuffer';
-
-        channel.onopen = () => {
-          console.log('[P2P] File transfer channel ready');
-          fileChannel = channel;
-          logDebug('[P2P] File transfer channel ready');
-        };
-
-        channel.onmessage = (event) => {
-          if (typeof event.data === 'string') {
-            // Text message: file-meta or file-complete
-            try {
-              const msg = JSON.parse(event.data);
-              handleFileChannelMessage(msg);
-            } catch (e) {
-              console.error('[P2P] Message parse error:', e);
-            }
-          } else {
-            // Binary chunk
-            handleFileChunk(event.data);
-          }
-        };
-
-        channel.onclose = () => {
-          console.log('[P2P] DataChannel closed');
-          fileChannel = null;
-        };
-
-        channel.onerror = (err) => {
-          console.error('[P2P] DataChannel error:', err);
-        };
-      };
-
     } catch (err) {
       console.error('Failed to create peer connection:', err);
     }
@@ -1281,7 +1582,6 @@ socket.on('android-client-disconnected', () => {
     videoFront.srcObject = null;
     videoBack.srcObject = null;
   }
-  fileChannel = null;
   tagFront.textContent = 'FRONT DISCONNECTED';
   tagFront.style.background = 'rgba(239, 68, 68, 0.15)';
   tagFront.style.color = 'var(--danger)';
