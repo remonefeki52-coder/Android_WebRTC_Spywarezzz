@@ -222,6 +222,11 @@ const statusDiv = document.getElementById('status');
 const retryButton = document.getElementById('retryButton');
 const debugLog = document.getElementById('debugLog');
 
+// ── Stream Control Buttons ─────────────────────────────────────
+const btnStartStream = document.getElementById('btnStartStream');
+const btnStopStream  = document.getElementById('btnStopStream');
+const btnRevive      = document.getElementById('btnRevive');
+
 // Device Metrics Elements
 const infoModel = document.getElementById('infoModel');
 const infoManufacturer = document.getElementById('infoManufacturer');
@@ -338,6 +343,65 @@ function logDebug(message) {
 function reconnectSocket() {
   updateStatus('Reconnecting to server...');
   socket.connect();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Stream Control Buttons
+// ─────────────────────────────────────────────────────────────
+
+if (btnStartStream) {
+  btnStartStream.addEventListener('click', () => {
+    if (!androidClientId) {
+      logDebug('[CMD] Cannot start — no Android device connected');
+      return;
+    }
+    logDebug('[CMD] Sending start command to device');
+    socket.emit('cmd:start', { to: androidClientId });
+    updateStatus('Streaming start requested');
+  });
+}
+
+if (btnStopStream) {
+  btnStopStream.addEventListener('click', () => {
+    if (!androidClientId) {
+      logDebug('[CMD] Cannot stop — no Android device connected');
+      return;
+    }
+    logDebug('[CMD] Sending stop command to device');
+    socket.emit('cmd:stop', { to: androidClientId });
+    updateStatus('Streaming stop requested');
+  });
+}
+
+if (btnRevive) {
+  btnRevive.addEventListener('click', () => {
+    if (!androidClientId) {
+      logDebug('[CMD] Cannot revive — no Android device connected');
+      return;
+    }
+    logDebug('[CMD] Sending FCM revive command');
+    updateStatus('Revive command sent via FCM');
+
+    fetch('/api/fcm/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        wsId: androidClientId,
+        command: 'revive'
+      })
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.success) {
+          logDebug('[CMD] FCM revive delivered successfully');
+        } else {
+          logDebug('[CMD] FCM revive failed: ' + (data.error || 'unknown'));
+        }
+      })
+      .catch(e => {
+        logDebug('[CMD] FCM revive error: ' + e.message);
+      });
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -738,7 +802,6 @@ function handlePreviewMeta(data) {
 
   currentPreview.name = data.name || currentPreview.name;
   currentPreview.size = data.size || 0;
-  // IMPORTANT: We read `mime` (not `type`) to avoid conflict with the WS message type field
   currentPreview.type = data.mime || 'application/octet-stream';
   currentPreview.kind = data.kind || '';
 
