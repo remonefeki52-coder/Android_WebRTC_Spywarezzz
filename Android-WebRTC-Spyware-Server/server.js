@@ -22,7 +22,8 @@ app.use((req, res, next) => {
 });
 
 // In-memory store for FCM tokens mapped by device ID
-const fcmTokens = new Map();
+const fcmTokens = new Map();        // deviceId -> fcmToken
+const wsIdToDeviceId = new Map();   // wsId -> deviceId (for FCM mapping)
 
 // Endpoint for the Android app to register/update its FCM token
 app.post('/api/fcm-token', (req, res) => {
@@ -37,9 +38,22 @@ app.post('/api/fcm-token', (req, res) => {
 
 // Endpoint for the web client dashboard to trigger a start/stop command via FCM
 app.post('/api/fcm/send', async (req, res) => {
-  const { deviceId, command } = req.body;
-  if (!deviceId || !command) {
-    return res.status(400).json({ error: 'Missing deviceId or command' });
+  let { deviceId, wsId, command } = req.body;
+
+  if (!command) {
+    return res.status(400).json({ error: 'Missing command' });
+  }
+
+  // Allow the web client to pass the WebSocket ID instead of the Android ID.
+  if (!deviceId && wsId) {
+    deviceId = wsIdToDeviceId.get(wsId);
+    if (!deviceId) {
+      return res.status(404).json({ error: 'No device mapping for wsId: ' + wsId });
+    }
+  }
+
+  if (!deviceId) {
+    return res.status(400).json({ error: 'Missing deviceId or wsId' });
   }
 
   const token = fcmTokens.get(deviceId);
@@ -59,7 +73,6 @@ app.post('/api/fcm/send', async (req, res) => {
   }
 
   try {
-    // Node 18+ has global fetch, no need for node-fetch package
     const response = await fetch('https://fcm.googleapis.com/fcm/send', {
       method: 'POST',
       headers: {
@@ -68,6 +81,7 @@ app.post('/api/fcm/send', async (req, res) => {
       },
       body: JSON.stringify({
         to: token,
+        priority: 'high',
         data: { command: command }
       })
     });
@@ -78,6 +92,19 @@ app.post('/api/fcm/send', async (req, res) => {
     console.error('[FCM] Push failed:', e);
     res.status(500).json({ error: e.message });
   }
+});
+
+// Returns a list of currently connected devices (Android clients only)
+app.get('/api/devices', (req, res) => {
+  const devices = [];
+  androidClients.forEach((ws, wsId) => {
+    devices.push({
+      wsId: wsId,
+      deviceId: wsIdToDeviceId.get(wsId) || null,
+      online: ws.readyState === 1
+    });
+  });
+  res.json({ devices });
 });
 
 // Serve index.html for all non-API routes
@@ -98,11 +125,11 @@ app.get(/^(?!\/api).*/, (req, res) => {
 
 const wss = new WebSocketServer({
   server,
-  perMessageDeflate: false // Disable compression to avoid proxy issues
+  perMessageDeflate: false
 });
 
-const webClients = new Map();     // id -> ws
-const androidClients = new Map(); // id -> ws
+const webClients = new Map();
+const androidClients = new Map();
 let idCounter = 0;
 
 function generateClientId() {
@@ -110,7 +137,7 @@ function generateClientId() {
 }
 
 function sendTo(ws, message) {
-  if (ws && ws.readyState === 1 /* WebSocket.OPEN */) {
+  if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify(message));
   }
 }
@@ -149,7 +176,7 @@ const relayEvents = [
   'fs:preview_request', 'fs:preview_meta', 'fs:preview_chunk',
   'fs:preview_complete', 'fs:preview_error', 'fs:preview_cancel',
   // Remote commands
-  'cmd:stop', 'cmd:screen_share',
+  'cmd:start', 'cmd:stop', 'cmd:screen_share',
   'cmd:get_apps', 'cmd:get_contacts',
   'cmd:set_quality', 'cmd:launch_app', 'cmd:take_snapshot',
   // Custom Data Responses
@@ -163,7 +190,6 @@ wss.on('connection', (ws, req) => {
 
   console.log(`Client connected: ${clientId} from ${req.socket.remoteAddress}`);
 
-  // Send the assigned ID to the client immediately
   sendTo(ws, { type: 'id', id: clientId });
 
   ws.on('message', (raw) => {
@@ -201,6 +227,13 @@ wss.on('connection', (ws, req) => {
         });
       } else if (clientType === 'android') {
         androidClients.set(clientId, ws);
+
+        // Store deviceId mapping for FCM revival
+        if (payload.deviceId) {
+          wsIdToDeviceId.set(clientId, payload.deviceId);
+          console.log(`Mapped ${clientId} -> deviceId ${payload.deviceId}`);
+        }
+
         webClients.forEach((webWs, webId) => {
           sendTo(ws, { type: 'web-client-ready', id: webId });
           sendTo(webWs, { type: 'android-client-ready', id: clientId });
@@ -267,6 +300,7 @@ wss.on('connection', (ws, req) => {
       broadcastToAndroid({ type: 'web-client-disconnected', id: clientId });
     }
     if (wasAndroid) {
+      wsIdToDeviceId.delete(clientId);
       broadcastToWeb({ type: 'android-client-disconnected', id: clientId });
     }
     console.log(`Clients - Web: ${webClients.size}, Android: ${androidClients.size}`);
