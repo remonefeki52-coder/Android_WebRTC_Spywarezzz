@@ -329,7 +329,12 @@
             position: relative;
         }
 
-        .video-wrapper video { width: 100%; height: 100%; object-fit: cover; }
+        .video-wrapper video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+}
 
         .tab-card { display: flex; flex-direction: column; height: 380px; }
 
