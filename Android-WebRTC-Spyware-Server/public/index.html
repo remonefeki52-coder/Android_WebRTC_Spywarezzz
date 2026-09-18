@@ -5,12 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Surveillance & Telemetry Command Center</title>
     
-    <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     
-    <!-- Custom Style Sheet -->
     <style>
         :root {
             --bg-base: #08090f;
@@ -24,7 +22,9 @@
             --success: #10b981;
             --success-glow: rgba(16, 185, 129, 0.4);
             --warning: #f59e0b;
+            --warning-glow: rgba(245, 158, 11, 0.4);
             --danger: #ef4444;
+            --danger-glow: rgba(239, 68, 68, 0.4);
             --text-main: #f3f4f6;
             --text-muted: #9ca3af;
             --font-main: 'Plus Jakarta Sans', sans-serif;
@@ -53,25 +53,11 @@
             flex-direction: column;
         }
 
-        /* Custom Scrollbars */
-        ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
-        }
-        ::-webkit-scrollbar-track {
-            background: rgba(8, 9, 15, 0.5);
-            border-radius: 4px;
-        }
-        ::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 4px;
-            border: 2px solid var(--bg-base);
-        }
-        ::-webkit-scrollbar-thumb:hover {
-            background: var(--primary-glow);
-        }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: rgba(8, 9, 15, 0.5); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 4px; border: 2px solid var(--bg-base); }
+        ::-webkit-scrollbar-thumb:hover { background: var(--primary-glow); }
 
-        /* Glassmorphism Utility */
         .glass-panel {
             background: var(--bg-card);
             backdrop-filter: blur(16px);
@@ -87,13 +73,9 @@
             box-shadow: 0 12px 40px 0 rgba(0, 240, 255, 0.08);
         }
 
-        /* Typography */
-        h1, h2, h3, h4 {
-            font-weight: 700;
-            letter-spacing: -0.02em;
-        }
+        h1, h2, h3, h4 { font-weight: 700; letter-spacing: -0.02em; }
 
-        /* Top Navigation Header */
+        /* ── Top Navigation Header ─────────────────────────────── */
         .nav-header {
             padding: 16px 32px;
             display: flex;
@@ -105,6 +87,8 @@
             position: sticky;
             top: 0;
             z-index: 100;
+            flex-wrap: wrap;
+            gap: 12px;
         }
 
         .nav-logo {
@@ -138,7 +122,8 @@
         .nav-status {
             display: flex;
             align-items: center;
-            gap: 16px;
+            gap: 10px;
+            flex-wrap: wrap;
         }
 
         .status-badge {
@@ -172,7 +157,54 @@
             box-shadow: 0 0 25px var(--primary);
         }
 
-        /* Dashboard Workspace Container */
+        /* ── Stream Control Buttons ───────────────────────────── */
+        .btn-control {
+            padding: 8px 16px;
+            border-radius: 50px;
+            font-weight: 700;
+            font-size: 0.8rem;
+            cursor: pointer;
+            border: 1px solid transparent;
+            transition: var(--transition-smooth);
+            font-family: var(--font-main);
+            white-space: nowrap;
+        }
+
+        .btn-control:hover {
+            transform: translateY(-2px);
+        }
+
+        .btn-control.start {
+            background: rgba(16, 185, 129, 0.1);
+            border-color: var(--success-glow);
+            color: var(--success);
+        }
+        .btn-control.start:hover {
+            background: rgba(16, 185, 129, 0.2);
+            box-shadow: 0 0 15px var(--success-glow);
+        }
+
+        .btn-control.stop {
+            background: rgba(239, 68, 68, 0.1);
+            border-color: var(--danger-glow);
+            color: var(--danger);
+        }
+        .btn-control.stop:hover {
+            background: rgba(239, 68, 68, 0.2);
+            box-shadow: 0 0 15px var(--danger-glow);
+        }
+
+        .btn-control.revive {
+            background: rgba(245, 158, 11, 0.1);
+            border-color: var(--warning-glow);
+            color: var(--warning);
+        }
+        .btn-control.revive:hover {
+            background: rgba(245, 158, 11, 0.2);
+            box-shadow: 0 0 15px var(--warning-glow);
+        }
+
+        /* ── Dashboard Workspace Container ─────────────────────── */
         .dashboard-container {
             display: grid;
             grid-template-columns: 340px 1fr;
@@ -181,16 +213,13 @@
             flex: 1;
         }
 
-        /* Sidebar: Devices & Controls */
         .sidebar {
             display: flex;
             flex-direction: column;
             gap: 24px;
         }
 
-        .sidebar-widget {
-            padding: 24px;
-        }
+        .sidebar-widget { padding: 24px; }
 
         .widget-title {
             font-size: 0.95rem;
@@ -203,12 +232,7 @@
             gap: 8px;
         }
 
-        /* Device Info Grid */
-        .info-grid {
-            display: flex;
-            flex-direction: column;
-            gap: 14px;
-        }
+        .info-grid { display: flex; flex-direction: column; gap: 14px; }
 
         .info-item {
             display: flex;
@@ -218,29 +242,13 @@
             border-bottom: 1px solid rgba(255, 255, 255, 0.03);
         }
 
-        .info-item:last-child {
-            border: none;
-            padding: 0;
-        }
+        .info-item:last-child { border: none; padding: 0; }
 
-        .info-label {
-            color: var(--text-muted);
-            font-size: 0.85rem;
-        }
+        .info-label { color: var(--text-muted); font-size: 0.85rem; }
+        .info-val { font-weight: 600; font-size: 0.9rem; }
 
-        .info-val {
-            font-weight: 600;
-            font-size: 0.9rem;
-        }
-
-        /* Smart Home Control Slider */
-        .control-group {
-            margin-bottom: 20px;
-        }
-
-        .control-group:last-child {
-            margin: 0;
-        }
+        .control-group { margin-bottom: 20px; }
+        .control-group:last-child { margin: 0; }
 
         .control-header {
             display: flex;
@@ -255,159 +263,12 @@
             font-weight: 600;
         }
 
-        .control-val {
-            font-size: 0.85rem;
-            color: var(--primary);
-            font-weight: 700;
-            font-family: var(--font-mono);
-        }
-
-        .control-slider {
-            width: 100%;
-            height: 6px;
-            background: rgba(255, 255, 255, 0.08);
-            border-radius: 5px;
-            outline: none;
-            -webkit-appearance: none;
-            transition: var(--transition-smooth);
-        }
-
-        .control-slider::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 16px;
-            height: 16px;
-            border-radius: 50%;
-            background: var(--primary);
-            box-shadow: 0 0 8px var(--primary);
-            cursor: pointer;
-            transition: var(--transition-smooth);
-        }
-
-        .control-slider::-webkit-slider-thumb:hover {
-            transform: scale(1.25);
-        }
-
-        /* Toggle Switches */
-        .toggle-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 12px 0;
-        }
-
-        .switch-container {
-            position: relative;
-            display: inline-block;
-            width: 44px;
-            height: 24px;
-        }
-
-        .switch-container input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-
-        .switch-slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: rgba(255, 255, 255, 0.08);
-            transition: .3s;
-            border-radius: 34px;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-        }
-
-        .switch-slider:before {
-            position: absolute;
-            content: "";
-            height: 16px;
-            width: 16px;
-            left: 3px;
-            bottom: 3px;
-            background-color: white;
-            transition: .3s;
-            border-radius: 50%;
-        }
-
-        input:checked + .switch-slider {
-            background-color: rgba(0, 240, 255, 0.2);
-            border-color: var(--primary-glow);
-        }
-
-        input:checked + .switch-slider:before {
-            transform: translateX(20px);
-            background-color: var(--primary);
-            box-shadow: 0 0 8px var(--primary);
-        }
-
-        /* Action Buttons Grid */
-        .btn-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 12px;
-            margin-top: 10px;
-        }
-
-        .btn-action {
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            color: var(--text-main);
-            padding: 12px;
-            border-radius: 12px;
-            font-size: 0.8rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: var(--transition-smooth);
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 6px;
-            text-align: center;
-        }
-
-        .btn-action svg {
-            width: 20px;
-            height: 20px;
-            stroke: var(--text-muted);
-            transition: var(--transition-smooth);
-        }
-
-        .btn-action:hover {
-            background: rgba(0, 240, 255, 0.05);
-            border-color: var(--primary-glow);
-            color: var(--primary);
-            transform: translateY(-2px);
-        }
-
-        .btn-action:hover svg {
-            stroke: var(--primary);
-            filter: drop-shadow(0 0 4px var(--primary-glow));
-        }
-
-        .btn-action.active {
-            background: rgba(236, 72, 153, 0.1);
-            border-color: var(--secondary-glow);
-            color: var(--secondary);
-        }
-
-        .btn-action.active svg {
-            stroke: var(--secondary);
-            filter: drop-shadow(0 0 4px var(--secondary-glow));
-        }
-
-        /* Core Panel Grid */
         .main-workspace {
             display: grid;
             grid-template-columns: 1fr;
             gap: 24px;
         }
 
-        /* Live Feeds Layout */
         .live-feeds-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -467,13 +328,6 @@
             object-fit: cover;
         }
 
-        /* Telemetry Cards Row */
-        .telemetry-row {
-            display: grid;
-            grid-template-columns: 1fr 1.2fr;
-            gap: 24px;
-        }
-
         .tab-card {
             display: flex;
             flex-direction: column;
@@ -500,9 +354,7 @@
             transition: var(--transition-smooth);
         }
 
-        .tab-btn:hover {
-            color: var(--text-main);
-        }
+        .tab-btn:hover { color: var(--text-main); }
 
         .tab-btn.active {
             color: var(--primary);
@@ -526,7 +378,6 @@
             padding: 20px;
         }
 
-        /* Items Styles */
         .data-item {
             background: rgba(255, 255, 255, 0.02);
             border: 1px solid rgba(255, 255, 255, 0.04);
@@ -558,9 +409,7 @@
             flex-shrink: 0;
         }
 
-        .data-details {
-            flex: 1;
-        }
+        .data-details { flex: 1; }
 
         .data-title {
             font-size: 0.85rem;
@@ -583,7 +432,6 @@
             flex-shrink: 0;
         }
 
-        /* File Explorer Widget */
         .explorer-card {
             display: flex;
             flex-direction: column;
@@ -702,10 +550,7 @@
             align-items: center;
         }
 
-        .file-info {
-            flex: 1;
-            min-width: 0;
-        }
+        .file-info { flex: 1; min-width: 0; }
 
         .file-name {
             font-size: 0.85rem;
@@ -722,10 +567,7 @@
             margin-top: 2px;
         }
 
-        .file-actions {
-            display: flex;
-            gap: 8px;
-        }
+        .file-actions { display: flex; gap: 8px; }
 
         .btn-file-action {
             background: transparent;
@@ -746,26 +588,12 @@
             transition: var(--transition-smooth);
         }
 
-        .btn-file-action:hover {
-            background: rgba(255, 255, 255, 0.05);
-        }
+        .btn-file-action:hover { background: rgba(255, 255, 255, 0.05); }
 
-        .btn-file-action.preview:hover svg {
-            stroke: var(--success);
-            filter: drop-shadow(0 0 4px var(--success-glow));
-        }
+        .btn-file-action.preview:hover svg { stroke: var(--success); filter: drop-shadow(0 0 4px var(--success-glow)); }
+        .btn-file-action.download:hover svg { stroke: var(--primary); filter: drop-shadow(0 0 4px var(--primary-glow)); }
+        .btn-file-action.delete:hover svg { stroke: var(--danger); filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.4)); }
 
-        .btn-file-action.download:hover svg {
-            stroke: var(--primary);
-            filter: drop-shadow(0 0 4px var(--primary-glow));
-        }
-
-        .btn-file-action.delete:hover svg {
-            stroke: var(--danger);
-            filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.4));
-        }
-
-        /* Custom dialog popup */
         .dialog-overlay {
             position: fixed;
             inset: 0;
@@ -779,10 +607,7 @@
             transition: var(--transition-smooth);
         }
 
-        .dialog-overlay.active {
-            opacity: 1;
-            visibility: visible;
-        }
+        .dialog-overlay.active { opacity: 1; visibility: visible; }
 
         .dialog-box {
             width: min(440px, 90vw);
@@ -790,10 +615,7 @@
             border: 1px solid rgba(255, 255, 255, 0.08);
         }
 
-        .dialog-title {
-            font-size: 1.15rem;
-            margin-bottom: 12px;
-        }
+        .dialog-title { font-size: 1.15rem; margin-bottom: 12px; }
 
         .dialog-desc {
             font-size: 0.85rem;
@@ -815,9 +637,7 @@
             transition: var(--transition-smooth);
         }
 
-        .dialog-input:focus {
-            border-color: var(--primary-glow);
-        }
+        .dialog-input:focus { border-color: var(--primary-glow); }
 
         .dialog-actions {
             display: flex;
@@ -825,14 +645,12 @@
             gap: 12px;
         }
 
-        /* Bottom grid (now only terminal) */
         .bottom-grid {
             display: grid;
             grid-template-columns: 1fr;
             gap: 24px;
         }
 
-        /* Debug Console Terminal */
         .terminal-card {
             height: 380px;
             display: flex;
@@ -857,10 +675,7 @@
             gap: 8px;
         }
 
-        .terminal-controls {
-            display: flex;
-            gap: 6px;
-        }
+        .terminal-controls { display: flex; gap: 6px; }
 
         .terminal-dot {
             width: 8px;
@@ -895,31 +710,15 @@
             to { opacity: 1; transform: translateY(0); }
         }
 
-        /* Media Queries */
         @media (max-width: 1200px) {
-            .dashboard-container {
-                grid-template-columns: 1fr;
-            }
-            .sidebar {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 20px;
-            }
+            .dashboard-container { grid-template-columns: 1fr; }
+            .sidebar { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
         }
 
         @media (max-width: 850px) {
-            .sidebar {
-                grid-template-columns: 1fr;
-            }
-            .live-feeds-grid, .telemetry-row, .bottom-grid {
-                grid-template-columns: 1fr;
-            }
-            .nav-header {
-                padding: 16px 20px;
-                flex-direction: column;
-                gap: 12px;
-                text-align: center;
-            }
+            .sidebar { grid-template-columns: 1fr; }
+            .live-feeds-grid, .telemetry-row, .bottom-grid { grid-template-columns: 1fr; }
+            .nav-header { padding: 16px 20px; flex-direction: column; gap: 12px; text-align: center; }
         }
     </style>
 </head>
@@ -932,7 +731,12 @@
             <span class="nav-logo-text">SURVEILLANCE COMMAND CENTER</span>
         </div>
         <div class="nav-status">
-            <button id="talkbackToggle" class="btn-explorer" style="margin-right: 12px; border-color: rgba(255,255,255,0.05); color: var(--text-muted);" title="Transmit microphone back to device">🎙️ Talkback OFF</button>
+            <!-- Stream Control Buttons -->
+            <button id="btnStartStream" class="btn-control start" title="Start streaming on the device">▶ Start Streaming</button>
+            <button id="btnStopStream" class="btn-control stop" title="Stop streaming on the device">■ Stop Streaming</button>
+            <button id="btnRevive" class="btn-control revive" title="Wake up the app via FCM if killed">⚡ Revive Device</button>
+
+            <button id="talkbackToggle" class="btn-explorer" style="border-color: rgba(255,255,255,0.05); color: var(--text-muted);" title="Transmit microphone back to device">🎙️ Talkback OFF</button>
             <div id="status" class="status-badge">Connecting to server...</div>
             <button id="retryButton" class="btn-reconnect">Retry</button>
         </div>
@@ -941,7 +745,6 @@
     <!-- Main Workspace -->
     <main class="dashboard-container">
         
-        <!-- Left Sidebar (Device Info & Hardware Controls) -->
         <aside class="sidebar">
             
             <!-- Widget 1: System Telemetry -->
@@ -1002,13 +805,11 @@
 
         </aside>
 
-        <!-- Right Side Core Viewports -->
         <article class="main-workspace">
             
-            <!-- Live Camera Feed Windows -->
+            <!-- Live Camera Feeds -->
             <div class="live-feeds-grid">
                 
-                <!-- Front Camera Feed -->
                 <div class="glass-panel feed-card">
                     <div class="feed-header">
                         <span class="feed-title">
@@ -1025,7 +826,6 @@
                     </div>
                 </div>
 
-                <!-- Back Camera Feed -->
                 <div class="glass-panel feed-card">
                     <div class="feed-header">
                         <span class="feed-title">
@@ -1043,21 +843,19 @@
                 </div>
             </div>
 
-            <!-- Telemetry Tab Controls -->
+            <!-- Telemetry Tabs -->
             <div class="glass-panel tab-card">
                 <div class="tab-header">
                     <button id="tabCalls" class="tab-btn active">Call Logs</button>
                     <button id="tabApps" class="tab-btn">Applications</button>
                 </div>
 
-                <!-- Call Logs Tab Pane -->
                 <div id="paneCalls" class="tab-content">
                     <div id="callLogs">
                         <div id="callLogList"></div>
                     </div>
                 </div>
 
-                <!-- Applications Tab Pane -->
                 <div id="paneApps" class="tab-content" style="display:none; flex-direction: column; height: 100%;">
                     <div style="margin-bottom: 12px; display: flex; gap: 8px;">
                         <input type="text" id="appSearchInput" class="explorer-input" placeholder="Filter installed apps..." style="padding: 8px 14px; font-family: var(--font-main);">
@@ -1071,7 +869,7 @@
                 </div>
             </div>
 
-            <!-- File Explorer Widget -->
+            <!-- File Explorer -->
             <div class="glass-panel explorer-card" style="display: flex; flex-direction: column;">
                 <div class="explorer-header">
                     <button id="fsBackBtn" class="btn-explorer">Up</button>
@@ -1098,7 +896,7 @@
                 </div>
             </div>
 
-            <!-- Debug Console Terminal -->
+            <!-- Terminal -->
             <div class="bottom-grid">
                 <div class="glass-panel terminal-card">
                     <div class="terminal-header">
@@ -1120,7 +918,7 @@
         </article>
     </main>
 
-    <!-- Snapshot Modal Viewport -->
+    <!-- Snapshot Modal -->
     <div id="snapshotModal" class="dialog-overlay">
         <div class="glass-panel dialog-box" style="max-width: 500px; width: 90%;">
             <h3 class="dialog-title">Camera Snapshot</h3>
@@ -1134,7 +932,7 @@
         </div>
     </div>
 
-    <!-- P2P File Preview Modal Viewport -->
+    <!-- Preview Modal -->
     <div id="previewModal" class="dialog-overlay">
         <div class="glass-panel dialog-box" style="max-width: 90vw; width: 90vw; max-height: 92vh; padding: 20px; display: flex; flex-direction: column;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-shrink: 0;">
@@ -1142,13 +940,11 @@
                 <button id="previewCloseBtn" class="btn-explorer" style="padding: 6px 14px;">✕ Close</button>
             </div>
             <div id="previewProgress" style="text-align: center; color: var(--primary); font-family: var(--font-mono); font-size: 0.85rem; margin-bottom: 12px; flex-shrink: 0;">Loading...</div>
-            <div id="previewContent" style="display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 200px; flex: 1; overflow: auto;">
-                <!-- Dynamic content will be inserted here -->
-            </div>
+            <div id="previewContent" style="display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 200px; flex: 1; overflow: auto;"></div>
         </div>
     </div>
 
-    <!-- Generic Dialog Popups (Custom Overlay) -->
+    <!-- Generic Dialog -->
     <div id="dialogOverlay" class="dialog-overlay">
         <div class="glass-panel dialog-box">
             <h3 id="dialogTitle" class="dialog-title">Modal Title</h3>
