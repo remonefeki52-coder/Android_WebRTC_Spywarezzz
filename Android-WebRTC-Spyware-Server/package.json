@@ -10,6 +10,7 @@
   "description": "WebRTC Spyware Server for Android Wallpaper Application",
   "dependencies": {
     "express": "^4.21.2",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "firebase-admin": "^13.0.0"
   }
 }
