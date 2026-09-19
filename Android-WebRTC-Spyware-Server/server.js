@@ -32,6 +32,7 @@ const androidDeviceInfo = new Map();  // wsId -> { model, name, deviceId, connec
 // FCM endpoints
 // ─────────────────────────────────────────────────────────────
 
+// Register/update FCM token from Android app
 app.post('/api/fcm-token', (req, res) => {
   const { token, deviceId } = req.body;
   if (!token || !deviceId) {
@@ -39,9 +40,10 @@ app.post('/api/fcm-token', (req, res) => {
   }
   fcmTokens.set(deviceId, token);
   console.log(`[FCM] Registered token for device: ${deviceId} -> ${token.substring(0, 15)}...`);
-  res.json({ success: true });
+  res.json({ success: true, totalDevices: fcmTokens.size });
 });
 
+// Send FCM to ONE specific device (requires a currently-connected wsId)
 app.post('/api/fcm/send', async (req, res) => {
   let { deviceId, wsId, command } = req.body;
 
@@ -83,7 +85,110 @@ app.post('/api/fcm/send', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// Devices REST API
+// Broadcast FCM to ALL known devices (online + offline)
+// Uses the persistent fcmTokens map, so it works even with
+// zero devices currently connected.
+// ─────────────────────────────────────────────────────────────
+app.post('/api/fcm/send-to-all', async (req, res) => {
+  const { command } = req.body;
+
+  if (!command) {
+    return res.status(400).json({ error: 'Missing command' });
+  }
+
+  if (fcmTokens.size === 0) {
+    return res.json({
+      success: true,
+      sent: 0,
+      failed: 0,
+      message: 'No FCM tokens registered yet. Open the app on at least one device first.'
+    });
+  }
+
+  const serverKey = process.env.FIREBASE_SERVER_KEY;
+  if (!serverKey) {
+    console.warn('[FCM-Broadcast] FIREBASE_SERVER_KEY not set');
+    return res.status(501).json({
+      error: 'Firebase Server Key not configured on server.',
+      knownDevices: fcmTokens.size
+    });
+  }
+
+  console.log(`[FCM-Broadcast] Broadcasting "${command}" to ${fcmTokens.size} device(s)`);
+
+  let sent = 0, failed = 0;
+  const results = [];
+
+  for (const [deviceId, token] of fcmTokens.entries()) {
+    try {
+      const response = await fetch('https://fcm.googleapis.com/fcm/send', {
+        method: 'POST',
+        headers: {
+          'Authorization': `key=${serverKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          to: token,
+          priority: 'high',
+          data: { command }
+        })
+      });
+
+      const result = await response.json();
+      const ok = result.success === 1 || result.success === '1';
+      if (ok) sent++; else failed++;
+
+      // If FCM says the token is not registered, clean it up
+      const errCode = result.results?.[0]?.error;
+      if (errCode === 'NotRegistered' || errCode === 'InvalidRegistration') {
+        console.warn(`[FCM-Broadcast] Removing stale token for device: ${deviceId} (${errCode})`);
+        fcmTokens.delete(deviceId);
+      }
+
+      results.push({
+        deviceId,
+        success: ok,
+        error: ok ? null : (errCode || 'unknown')
+      });
+    } catch (e) {
+      failed++;
+      results.push({ deviceId, success: false, error: e.message });
+    }
+  }
+
+  console.log(`[FCM-Broadcast] Done: sent=${sent}, failed=${failed}`);
+  res.json({ success: true, sent, failed, results });
+});
+
+// List ALL known devices (connected + offline with stored token)
+app.get('/api/devices/known', (req, res) => {
+  const known = [];
+
+  for (const [deviceId, token] of fcmTokens.entries()) {
+    // Find the wsId currently mapped to this deviceId (if any)
+    let wsId = null;
+    for (const [w, d] of wsIdToDeviceId.entries()) {
+      if (d === deviceId) { wsId = w; break; }
+    }
+
+    const info = wsId ? androidDeviceInfo.get(wsId) : null;
+    const online = wsId ? androidClients.has(wsId) : false;
+
+    known.push({
+      deviceId,
+      wsId,
+      online,
+      name: info?.name || null,
+      model: info?.model || null,
+      tokenPreview: token.substring(0, 12) + '...'
+    });
+  }
+
+  res.json({ count: known.length, devices: known });
+});
+
+// ─────────────────────────────────────────────────────────────
+// Devices REST API (currently-connected only)
 // ─────────────────────────────────────────────────────────────
 
 app.get('/api/devices', (req, res) => {
@@ -149,7 +254,6 @@ function findClient(id) {
   return webClients.get(id) || androidClients.get(id);
 }
 
-// Build a rich payload for android-client-ready notifications
 function buildAndroidReadyPayload(wsId) {
   const info = androidDeviceInfo.get(wsId) || {};
   return {
