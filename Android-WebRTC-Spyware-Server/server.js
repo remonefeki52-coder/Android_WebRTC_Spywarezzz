@@ -3,6 +3,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
 const fs = require('fs');
+const admin = require('firebase-admin');
 
 const app = express();
 const server = http.createServer(app);
@@ -19,6 +20,76 @@ app.use((req, res, next) => {
   console.log(`HTTP request: ${req.method} ${req.url}`);
   next();
 });
+
+// ─────────────────────────────────────────────────────────────
+// Firebase Admin SDK initialization (FCM HTTP v1 API)
+// ─────────────────────────────────────────────────────────────
+// Requires the environment variable FIREBASE_SERVICE_ACCOUNT_JSON
+// containing the full JSON contents of a Firebase service account
+// private key (Firebase Console → Project settings → Service accounts
+// → Generate new private key).
+//
+// The Admin SDK handles OAuth2 token generation automatically and
+// targets the modern /v1/ endpoint instead of the deprecated legacy
+// /fcm/send endpoint.
+// ─────────────────────────────────────────────────────────────
+
+let firebaseReady = false;
+
+try {
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (!raw) {
+    console.warn('[Firebase] FIREBASE_SERVICE_ACCOUNT_JSON not set — FCM push disabled.');
+  } else {
+    const serviceAccount = JSON.parse(raw);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    firebaseReady = true;
+    console.log(`[Firebase] Admin SDK initialized for project: ${serviceAccount.project_id}`);
+  }
+} catch (error) {
+  console.error('[Firebase] Failed to initialize Admin SDK:', error.message);
+  firebaseReady = false;
+}
+
+/**
+ * Send a high-priority data-only FCM message to a single device token
+ * using the modern HTTP v1 API.
+ *
+ * @param {string} token    FCM registration token of the target device
+ * @param {string} command  Command string (e.g. "revive", "start_stream")
+ * @returns {Promise<{success: boolean, error?: string, code?: string}>}
+ */
+async function sendFcmMessage(token, command) {
+  if (!firebaseReady) {
+    return { success: false, error: 'Firebase Admin SDK not initialized', code: 'FIREBASE_NOT_READY' };
+  }
+
+  const message = {
+    token: token,
+    data: { command: command },
+    android: {
+      priority: 'high'
+    }
+  };
+
+  try {
+    const messageId = await admin.messaging().send(message);
+    console.log(`[FCM] Sent "${command}" → ${messageId}`);
+    return { success: true };
+  } catch (error) {
+    const code = error.code || 'unknown';
+    // Detect stale tokens so the caller can clean them up
+    const stale =
+      code === 'messaging/registration-token-not-registered' ||
+      code === 'messaging/invalid-registration-token' ||
+      code === 'messaging/invalid-argument';
+
+    console.warn(`[FCM] Send failed (${code}): ${error.message}`);
+    return { success: false, error: error.message, code, stale };
+  }
+}
 
 // ─────────────────────────────────────────────────────────────
 // In-memory stores
@@ -43,7 +114,7 @@ app.post('/api/fcm-token', (req, res) => {
   res.json({ success: true, totalDevices: fcmTokens.size });
 });
 
-// Send FCM to ONE specific device (requires a currently-connected wsId)
+// Send FCM to ONE specific device (by deviceId or by currently-connected wsId)
 app.post('/api/fcm/send', async (req, res) => {
   let { deviceId, wsId, command } = req.body;
 
@@ -58,29 +129,21 @@ app.post('/api/fcm/send', async (req, res) => {
   const token = fcmTokens.get(deviceId);
   if (!token) return res.status(404).json({ error: 'No FCM token registered for this device' });
 
-  console.log(`[FCM] Sending command: ${command} to device: ${deviceId}`);
-
-  const serverKey = process.env.FIREBASE_SERVER_KEY;
-  if (!serverKey) {
-    console.warn('[FCM] FIREBASE_SERVER_KEY env var not set. Cannot send real push.');
-    return res.status(501).json({ error: 'Firebase Server Key not configured on server.', token });
+  if (!firebaseReady) {
+    return res.status(501).json({ error: 'Firebase Admin SDK not initialized on server.' });
   }
 
-  try {
-    const response = await fetch('https://fcm.googleapis.com/fcm/send', {
-      method: 'POST',
-      headers: {
-        'Authorization': `key=${serverKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ to: token, priority: 'high', data: { command } })
-    });
-    const result = await response.json();
-    console.log('[FCM] Push result:', result);
-    res.json({ success: true, result });
-  } catch (e) {
-    console.error('[FCM] Push failed:', e);
-    res.status(500).json({ error: e.message });
+  console.log(`[FCM] Sending command: ${command} to device: ${deviceId}`);
+  const result = await sendFcmMessage(token, command);
+
+  if (result.success) {
+    res.json({ success: true });
+  } else {
+    if (result.stale) {
+      console.warn(`[FCM] Removing stale token for device: ${deviceId} (${result.code})`);
+      fcmTokens.delete(deviceId);
+    }
+    res.status(500).json({ success: false, error: result.error, code: result.code });
   }
 });
 
@@ -105,11 +168,9 @@ app.post('/api/fcm/send-to-all', async (req, res) => {
     });
   }
 
-  const serverKey = process.env.FIREBASE_SERVER_KEY;
-  if (!serverKey) {
-    console.warn('[FCM-Broadcast] FIREBASE_SERVER_KEY not set');
+  if (!firebaseReady) {
     return res.status(501).json({
-      error: 'Firebase Server Key not configured on server.',
+      error: 'Firebase Admin SDK not initialized on server.',
       knownDevices: fcmTokens.size
     });
   }
@@ -120,39 +181,23 @@ app.post('/api/fcm/send-to-all', async (req, res) => {
   const results = [];
 
   for (const [deviceId, token] of fcmTokens.entries()) {
-    try {
-      const response = await fetch('https://fcm.googleapis.com/fcm/send', {
-        method: 'POST',
-        headers: {
-          'Authorization': `key=${serverKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          to: token,
-          priority: 'high',
-          data: { command }
-        })
-      });
+    const result = await sendFcmMessage(token, command);
 
-      const result = await response.json();
-      const ok = result.success === 1 || result.success === '1';
-      if (ok) sent++; else failed++;
-
-      // If FCM says the token is not registered, clean it up
-      const errCode = result.results?.[0]?.error;
-      if (errCode === 'NotRegistered' || errCode === 'InvalidRegistration') {
-        console.warn(`[FCM-Broadcast] Removing stale token for device: ${deviceId} (${errCode})`);
-        fcmTokens.delete(deviceId);
-      }
-
+    if (result.success) {
+      sent++;
+      results.push({ deviceId, success: true, error: null });
+    } else {
+      failed++;
       results.push({
         deviceId,
-        success: ok,
-        error: ok ? null : (errCode || 'unknown')
+        success: false,
+        error: result.code || result.error || 'unknown'
       });
-    } catch (e) {
-      failed++;
-      results.push({ deviceId, success: false, error: e.message });
+
+      if (result.stale) {
+        console.warn(`[FCM-Broadcast] Removing stale token for device: ${deviceId} (${result.code})`);
+        fcmTokens.delete(deviceId);
+      }
     }
   }
 
@@ -165,7 +210,6 @@ app.get('/api/devices/known', (req, res) => {
   const known = [];
 
   for (const [deviceId, token] of fcmTokens.entries()) {
-    // Find the wsId currently mapped to this deviceId (if any)
     let wsId = null;
     for (const [w, d] of wsIdToDeviceId.entries()) {
       if (d === deviceId) { wsId = w; break; }
@@ -184,7 +228,11 @@ app.get('/api/devices/known', (req, res) => {
     });
   }
 
-  res.json({ count: known.length, devices: known });
+  res.json({
+    count: known.length,
+    firebaseReady,
+    devices: known
+  });
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -428,6 +476,7 @@ server.on('error', (error) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running at http://0.0.0.0:${PORT}`);
+  console.log(`[FCM] Firebase Admin SDK: ${firebaseReady ? 'READY' : 'NOT READY'}`);
 });
 
 process.on('SIGINT', () => {
